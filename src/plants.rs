@@ -381,31 +381,22 @@ impl Plant {
                 }
             }
             Phase::Ready => {
-                // c_evilmushroom.st READY: grab at 100, per-think 50% suck within 416 (no
-                // facing/cooldown gate), spit only when the ready loop finishes.
-                let ready_done = self.time >= duration;
-                let phase = if self.kind == Kind::Rose {
-                    if visible && facing && self.cooldown == 0. {
-                        Some(if distance < 225. {
+                if visible && facing && self.cooldown == 0. {
+                    let phase = if self.kind == Kind::Rose {
+                        if distance < 225. {
                             Phase::Melee
                         } else if distance < 650. {
                             Phase::Spit
                         } else {
                             Phase::Fan
-                        })
+                        }
+                    } else if distance < 100. {
+                        Phase::Grab
+                    } else if distance < 416. && self.random() & 1 == 0 {
+                        Phase::Suck
                     } else {
-                        None
-                    }
-                } else if visible && distance < 100. {
-                    Some(Phase::Grab)
-                } else if visible && distance < 416. && self.random() & 1 == 0 {
-                    Some(Phase::Suck)
-                } else if visible && facing && ready_done {
-                    Some(Phase::Spit)
-                } else {
-                    None
-                };
-                if let Some(phase) = phase {
+                        Phase::Spit
+                    };
                     self.set(phase);
                     out.sounds.push(match (self.kind, phase) {
                         (Kind::Rose, Phase::Melee) => {
@@ -467,8 +458,8 @@ impl Plant {
                 }
             }
             Phase::Suck => {
-                if !visible || distance >= 416. {
-                    self.set(Phase::Ready);
+                if !visible || distance >= 416. || self.time >= 2. {
+                    self.set(Phase::Release);
                 } else if distance < 100. {
                     self.set(Phase::Grab);
                 } else {
@@ -481,14 +472,11 @@ impl Plant {
                 }
             }
             Phase::Grab => {
-                // ATTACK_GRAB: ANIM_DONE -> DIGEST if still within 100, else READY.
-                if self.time >= duration {
-                    if visible && distance < 100. {
-                        self.set(Phase::Digest);
-                        out.sounds.push("sound/character/evil_mushroom/digest.wav");
-                    } else {
-                        self.set(Phase::Ready);
-                    }
+                if !visible || distance >= 120. {
+                    self.set(Phase::Release);
+                } else if self.time >= duration {
+                    self.set(Phase::Digest);
+                    out.sounds.push("sound/character/evil_mushroom/digest.wav");
                 }
             }
             Phase::Digest => {
