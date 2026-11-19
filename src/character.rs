@@ -3363,8 +3363,10 @@ impl TwoHand {
             let x = x.clamp(0., 1.);
             x * x * (3. - 2. * x)
         };
-        let end = (duration - 0.04).max(hit + 0.25);
-        let rest = hit + 0.10;
+        // The swing action ends soon after the hit; finish the return inside it so the arm never
+        // snaps back to the carried pose when the clip stops.
+        let end = (hit + 0.20).min(duration - 0.01).max(hit + 0.10);
+        let rest = (hit + 0.05).min(end - 0.08);
         let wind_at = (hit - 0.22).max(0.10);
         let d0 = (r0 * self.direction).normalize();
         let wind_d = vec3(-0.26, 0., 0.97).normalize();
