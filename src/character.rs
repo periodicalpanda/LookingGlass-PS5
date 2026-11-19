@@ -1044,7 +1044,7 @@ impl Character {
                 .map(|p| {
                     let alt = p.alternate();
                     let swing = if alt {
-                        HhSwing::Jump
+                        HhSwing::Combo
                     } else if crate::weapons::ACTION_CLIPS[p.clip] == "mallet_att_3_prim_02" {
                         HhSwing::Spin
                     } else {
@@ -3377,15 +3377,28 @@ const HH_SPIN_FRONT: f32 = 0.8;
 const HH_WIND: GripKey = GripKey { hand: vec3(2., -12., -6.), shaft: vec3(-0.6, -0.75, 0.1), face: vec3(0.6, -0.5, 0.) };
 /// Spin sweep: horse held straight out to her front-right at waist height, face leading.
 const HH_SWEEP: GripKey = GripKey { hand: vec3(14., -8., -6.), shaft: vec3(0.55, -0.83, 0.05), face: vec3(0.8, 0.5, 0.) };
-/// Jump slam: crouch before the leap, leap height, landing crouch and lean.
-const HH_JUMP_SET: f32 = 6.;
-const HH_JUMP: f32 = 22.;
-const HH_JUMP_LAND: f32 = 16.;
-const HH_JUMP_BEND: f32 = 0.45;
-/// Jump slam top: horse raised high overhead and cocked back.
-const HH_HIGH: GripKey = GripKey { hand: vec3(1., -4., 17.), shaft: vec3(-0.55, 0.05, 0.85), face: vec3(1., 0., 0.5) };
-/// Jump slam landing: horse driven down forward, head on the floor ahead of her.
-const HH_GROUND: GripKey = GripKey { hand: vec3(13., -4., -13.), shaft: vec3(0.8, 0.05, -0.6), face: vec3(-0.5, 0., -1.) };
+/// Combo uppercut: horse low behind her right hip, head down.
+const HH_UC_LOW: GripKey = GripKey { hand: vec3(-1., -11., -15.), shaft: vec3(-0.45, -0.35, -0.82), face: vec3(0., -1., 0.) };
+/// Uppercut rising through the front, head leading forward.
+const HH_UC_FRONT: GripKey = GripKey { hand: vec3(14., -6., -9.), shaft: vec3(0.85, -0.1, -0.5), face: vec3(0.5, 0., 0.85) };
+/// Top of the uppercut: horse high overhead.
+const HH_UC_HIGH: GripKey = GripKey { hand: vec3(5., -4., 16.), shaft: vec3(0.35, 0., 0.94), face: vec3(-1., 0., 0.35) };
+/// Brought down low on her left after the uppercut.
+const HH_SP_LEFT: GripKey = GripKey { hand: vec3(8., 2., -13.), shaft: vec3(0.25, 0.9, -0.35), face: vec3(0., 0., -1.) };
+/// Spin: held out to her front-left at waist height, face leading the turn.
+const HH_SP_SWEEP: GripKey = GripKey { hand: vec3(13., 3., -6.), shaft: vec3(0.55, 0.83, 0.05), face: vec3(0.83, -0.55, 0.) };
+/// End of the spin: raised at her left shoulder.
+const HH_SP_END: GripKey = GripKey { hand: vec3(3., 0., 10.), shaft: vec3(0.1, 0.45, 0.9), face: vec3(1., 0., 0.) };
+/// Head planted on the floor in front to vault from.
+const HH_PLANT: GripKey = GripKey { hand: vec3(8., -4., -16.), shaft: vec3(0.1, 0., -1.), face: vec3(1., 0., 0.) };
+/// Springing up off the planted horse, arm pushing down.
+const HH_VAULT: GripKey = GripKey { hand: vec3(4., -5., -17.), shaft: vec3(0.1, 0., -1.), face: vec3(1., 0., 0.) };
+/// Airborne: raised high in the right hand alone, cocked back.
+const HH_ONE_HIGH: GripKey = GripKey { hand: vec3(-1., -6., 18.), shaft: vec3(-0.45, 0., 0.9), face: vec3(1., 0., 0.5) };
+/// One-handed slam: head driven into the floor ahead of her right side.
+const HH_ONE_SLAM: GripKey = GripKey { hand: vec3(12., -6., -11.), shaft: vec3(0.35, 0., -0.94), face: vec3(-0.94, 0., -0.35) };
+/// Where the free left hand reaches for balance in one-handed swings (out to her side).
+const HH_BALANCE: Vec3 = vec3(-2., 24., 3.);
 const HH_RIGHT_POLE: Vec3 = vec3(-0.4, -1., -0.5);
 const HH_LEFT_POLE: Vec3 = vec3(-0.4, 1., -0.5);
 
@@ -3397,10 +3410,15 @@ struct HhBody {
     drop: f32,
     bend: f32,
     turn: f32,
+    /// How far the left hand has let go of the shaft (one-handed swings).
+    free: f32,
 }
 impl HhBody {
     const fn new(drop: f32, bend: f32) -> Self {
-        Self { drop, bend, turn: 0. }
+        Self { drop, bend, turn: 0., free: 0. }
+    }
+    const fn full(drop: f32, bend: f32, turn: f32, free: f32) -> Self {
+        Self { drop, bend, turn, free }
     }
     const fn turned(self, turn: f32) -> Self {
         Self { turn, ..self }
@@ -3410,6 +3428,7 @@ impl HhBody {
             drop: self.drop + (other.drop - self.drop) * u,
             bend: self.bend + (other.bend - self.bend) * u,
             turn: self.turn + (other.turn - self.turn) * u,
+            free: self.free + (other.free - self.free) * u,
         }
     }
 }
@@ -3420,8 +3439,8 @@ enum HhSwing {
     Slam,
     /// Spinning sweep (second primary swing).
     Spin,
-    /// Jump slam (alternate attack).
-    Jump,
+    /// Uppercut, spin and vault into a one-handed slam (alternate attack).
+    Combo,
 }
 /// One beat of a swing: blend from one placement to the next.
 struct HhBeat {
@@ -3466,35 +3485,66 @@ fn hh_slam(time: f32, duration: f32, hit: f32) -> HhBeat {
         hh_recover(HH_IMPACT, down, (time - hold) / recover)
     }
 }
-/// Madness Returns combo finisher (alternate): crouch, leap with the horse raised high overhead,
-/// hang at the top, then drive it down into the floor and land in a deep crouch.
-fn hh_jump_slam(time: f32, duration: f32, hit: f32) -> HhBeat {
-    let hit = hit.clamp(0.3, duration.max(0.35));
-    let (crouch, takeoff, apex) = (hit * 0.15, hit * 0.45, hit * 0.70);
-    let recover = 0.35f32.min((duration - hit) * 0.6).max(0.);
-    let hold = (duration - recover).max(hit);
-    let set = HhBody::new(HH_JUMP_SET, 0.15);
-    let rise = HhBody::new(-HH_JUMP, -0.15);
-    let top = HhBody::new(-HH_JUMP - 2., -0.2);
-    let land = HhBody::new(HH_JUMP_LAND, HH_JUMP_BEND);
-    if time < crouch {
-        let u = hh_smooth(time / crouch);
-        HhBeat { from: HH_CARRY, to: HH_LIFT, u, body: HhBody::default().lerp(set, u) }
-    } else if time < takeoff {
-        let x = ((time - crouch) / (takeoff - crouch)).clamp(0., 1.);
-        let u = 1. - (1. - x) * (1. - x);
-        HhBeat { from: HH_LIFT, to: HH_HIGH, u: hh_smooth(x), body: set.lerp(rise, u) }
-    } else if time < apex {
-        let u = hh_smooth((time - takeoff) / (apex - takeoff));
-        HhBeat { from: HH_HIGH, to: HH_HIGH, u: 1., body: rise.lerp(top, u) }
-    } else if time < hit {
-        let x = ((time - apex) / (hit - apex)).clamp(0., 1.);
-        HhBeat { from: HH_HIGH, to: HH_GROUND, u: x * x, body: top.lerp(land, x * x) }
-    } else if time < hold || recover <= 0. {
-        HhBeat { from: HH_GROUND, to: HH_GROUND, u: 1., body: land }
-    } else {
-        hh_recover(HH_GROUND, land, (time - hold) / recover)
-    }
+#[derive(Clone, Copy)]
+enum HhEase {
+    Smooth,
+    In,
+    Out,
+}
+/// One key of a keyed swing: at `at` seconds the weapon sits at `key` with `body`, reached from
+/// the previous key with `ease`.
+struct HhFrame {
+    at: f32,
+    key: GripKey,
+    body: HhBody,
+    ease: HhEase,
+}
+const fn hh_frame(at: f32, key: GripKey, drop: f32, bend: f32, turn: f32, free: f32, ease: HhEase) -> HhFrame {
+    HhFrame { at, key, body: HhBody::full(drop, bend, turn, free), ease }
+}
+const HH_TURN: f32 = -std::f32::consts::TAU;
+/// Madness Returns hobby-horse combo (alternate), keyed from the reference footage. Hits land at
+/// `weapons::HOBBY_COMBO_HITS` (0.5 uppercut, 1.2 spin, 2.3 slam) of 3.4 s.
+///
+/// Uppercut: from low behind her right hip, the horse sweeps forward and up in front of her to
+/// high overhead, then drops to her left. Spin: wound to the left, she pivots a full turn to her
+/// right with it held out at waist height, finishing raised at her left shoulder. Vault: she
+/// plants the head in front, springs up over it, raises it high in her right hand alone with the
+/// left arm out for balance, drives it down into the floor and lands kneeling before getting up.
+const HH_COMBO: [HhFrame; 15] = [
+    hh_frame(0.00, HH_CARRY, 0., 0., 0., 0., HhEase::Smooth),
+    hh_frame(0.20, HH_UC_LOW, 4., 0.15, 0., 0., HhEase::Smooth),
+    hh_frame(0.40, HH_UC_FRONT, 2., 0.05, 0., 0., HhEase::In),
+    hh_frame(0.62, HH_UC_HIGH, -3., -0.2, 0., 0., HhEase::Out),
+    hh_frame(0.85, HH_SP_LEFT, 5., 0.15, 0.3, 0., HhEase::Smooth),
+    hh_frame(1.00, HH_SP_SWEEP, 4., 0.1, 0.6, 0., HhEase::Smooth),
+    hh_frame(1.20, HH_SP_SWEEP, 4., 0.1, -0.93, 0., HhEase::In),
+    hh_frame(1.45, HH_SP_SWEEP, 3., 0.05, HH_TURN, 0., HhEase::Out),
+    hh_frame(1.62, HH_SP_END, 0., -0.05, HH_TURN, 0., HhEase::Smooth),
+    hh_frame(1.80, HH_PLANT, 10., 0.3, HH_TURN, 0., HhEase::Smooth),
+    hh_frame(1.98, HH_VAULT, -14., 0.1, HH_TURN, 0., HhEase::Out),
+    hh_frame(2.12, HH_ONE_HIGH, -26., -0.2, HH_TURN, 1., HhEase::Out),
+    hh_frame(2.30, HH_ONE_SLAM, 16., 0.5, HH_TURN, 1., HhEase::In),
+    hh_frame(2.95, HH_ONE_SLAM, 16., 0.5, HH_TURN, 1., HhEase::Smooth),
+    hh_frame(3.40, HH_CARRY, 0., 0., HH_TURN, 0., HhEase::Smooth),
+];
+fn hh_track(frames: &[HhFrame], time: f32) -> HhBeat {
+    let i = frames.iter().rposition(|f| f.at <= time).unwrap_or(0);
+    let a = &frames[i];
+    let Some(b) = frames.get(i + 1) else {
+        return HhBeat { from: a.key, to: a.key, u: 1., body: a.body };
+    };
+    let x = ((time - a.at) / (b.at - a.at)).clamp(0., 1.);
+    let u = match b.ease {
+        HhEase::Smooth => hh_smooth(x),
+        HhEase::In => x * x,
+        HhEase::Out => 1. - (1. - x) * (1. - x),
+    };
+    HhBeat { from: a.key, to: b.key, u, body: a.body.lerp(b.body, u) }
+}
+fn hh_combo(time: f32, duration: f32) -> HhBeat {
+    let last = HH_COMBO[HH_COMBO.len() - 1].at;
+    hh_track(&HH_COMBO, time * last / duration.max(1e-3))
 }
 /// Madness Returns spinning sweep (second primary swing): wind up with the horse cocked back on
 /// her right, then pivot a full turn to her left with it held out at waist height, passing in
@@ -3590,13 +3640,20 @@ impl TwoHand {
     }
     /// The tag transform the weapon should have this frame, in skeleton space, and the spine bend.
     fn target(&self, play: Option<(f32, f32, f32, HhSwing)>, world: &[Transform]) -> (Transform, HhBody) {
-        let beat = match play {
-            Some((time, duration, hit, HhSwing::Slam)) => hh_slam(time, duration, hit),
-            Some((time, duration, hit, HhSwing::Spin)) => hh_spin(time, duration, hit),
-            Some((time, duration, hit, HhSwing::Jump)) => hh_jump_slam(time, duration, hit),
-            None => HhBeat { from: HH_CARRY, to: HH_CARRY, u: 0., body: HhBody::default() },
+        let (beat, facing) = match play {
+            Some((time, duration, hit, HhSwing::Slam)) => (hh_slam(time, duration, hit), 0.),
+            Some((time, duration, hit, HhSwing::Spin)) => (hh_spin(time, duration, hit), 0.),
+            // The combo is keyed to where she faces (the aim), not to the twisted two-handed
+            // stance, so the uppercut, spin and slam land in front of her. It blends over from
+            // the carry and back.
+            Some((time, duration, _, HhSwing::Combo)) => {
+                (hh_combo(time, duration), hh_smooth(time / 0.2) * hh_smooth((duration - time) / 0.45))
+            }
+            None => (HhBeat { from: HH_CARRY, to: HH_CARRY, u: 0., body: HhBody::default() }, 0.),
         };
-        let frame = self.chest_frame(world);
+        let chest = self.chest_frame(world);
+        let ahead = Quat::from_rotation_z(beat.body.turn * self.weight);
+        let frame = Transform { rotation: chest.rotation.slerp(ahead, facing).normalize(), translation: chest.translation };
         let shoulder = frame.rotation.inverse() * (world[self.right[0]].translation - frame.translation);
         let local = self.placement(beat.from, beat.to, beat.u, shoulder);
         (
@@ -3674,8 +3731,17 @@ impl TwoHand {
         let turn = Quat::from_rotation_arc(knuckles.try_normalize().unwrap_or(axis), axis);
         let left_rot = (turn * world[lh].rotation).normalize();
         let palm = world[lh].rotation.inverse() * (world[self.left_palm].translation - world[lh].translation);
-        let left_rot = world[lh].rotation.slerp(left_rot, w).normalize();
-        let wrist = world[lh].translation.lerp(grip - left_rot * palm, w);
+        let hold = w * (1. - body.free.clamp(0., 1.));
+        let left_rot = world[lh].rotation.slerp(left_rot, hold).normalize();
+        // Let go and take hold again along an arc around the shoulder, not through the body.
+        let shoulder = world[self.left[0]].translation;
+        let balance = self.chest_frame(&world).point(HH_BALANCE) - shoulder;
+        let held_at = grip - left_rot * palm - shoulder;
+        let k = (hold / w.max(1e-3)).clamp(0., 1.);
+        let arc = Quat::IDENTITY.slerp(Quat::from_rotation_arc(balance.normalize(), held_at.normalize()), k)
+            * balance.normalize()
+            * (balance.length().min(18.) + (held_at.length() - balance.length().min(18.)) * k);
+        let wrist = world[lh].translation.lerp(shoulder + arc, w);
         reach_arm(skeleton, self.left, wrist, Some(frame * HH_LEFT_POLE), 1., pose);
         let world = skeleton.global_pose(pose);
         pose[lh].rotation = (parent_rot(lh, &world).inverse() * left_rot).normalize();
@@ -3766,19 +3832,27 @@ mod hobby_probe {
                 cases.push((format!("{n}_{k}"), c.sample(t, true), None));
             }
         }
-        for n in ["mallet_att_3_prim_01", "mallet_att_3_prim_02", "mallet_att_3_alt"] {
+        for n in ["mallet_att_3_prim_01", "mallet_att_3_prim_02"] {
             let c = clip(n);
             let dur = c.duration();
             report += &format!("{n} duration {dur:.3}\n");
+            let swing = if n.ends_with("_02") { HhSwing::Spin } else { HhSwing::Slam };
             let mut t = 0.;
             let mut k = 0;
             while t <= dur + 1e-4 {
-                let swing = if n.ends_with("_alt") { HhSwing::Jump } else if n.ends_with("_02") { HhSwing::Spin } else { HhSwing::Slam };
-                let hit = if swing == HhSwing::Jump { 0.65 } else { 0.35 };
-                cases.push((format!("{n}_{k:02}"), c.sample(t, false), Some((t, dur, hit, swing))));
+                cases.push((format!("{n}_{k:02}"), c.sample(t, false), Some((t, dur, 0.35, swing))));
                 t += 1. / 30.;
                 k += 1;
             }
+        }
+        // The combo is posed over the idle stance only.
+        let idle = clip("ready_bw");
+        let dur = crate::weapons::HOBBY_COMBO_DURATION;
+        let mut k = 0;
+        while k as f32 / 30. <= dur + 1e-4 {
+            let t = k as f32 / 30.;
+            cases.push((format!("combo_{k:03}"), idle.sample(0., true), Some((t, dur, 0., HhSwing::Combo))));
+            k += 1;
         }
         for (name, mut pose, play) in cases {
             hh.apply(0.0, true, play, &sk, tag, &mut pose);

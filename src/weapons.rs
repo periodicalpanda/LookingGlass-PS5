@@ -112,6 +112,22 @@ pub struct Playing {
     paid: bool,
     #[serde(default)]
     stage: crate::weapon_rules::Stage,
+    /// Hits and swing sounds already played by the hobby-horse combo.
+    #[serde(default)]
+    combo_hits: u8,
+    #[serde(default)]
+    combo_swings: u8,
+}
+/// Hobby-horse pack: the Mallet's alternate attack is the Madness Returns combo (uppercut, spin,
+/// vault into a one-handed slam), timed from the reference footage.
+pub const HOBBY_COMBO_DURATION: f32 = 3.4;
+/// Hit frames of the combo: the uppercut, the spin passing in front, the slam landing.
+pub const HOBBY_COMBO_HITS: [f32; 3] = [0.5, 1.2, 2.3];
+/// Swing sounds, a beat before each hit.
+pub const HOBBY_COMBO_SWINGS: [f32; 3] = [0.3, 1.0, 2.12];
+/// Whether a playing attack is the hobby-horse combo.
+pub fn hobby_combo(weapon: usize, alternate: bool, hobby_horse: bool) -> bool {
+    weapon == 2 && alternate && hobby_horse
 }
 #[derive(Default, Debug)]
 pub struct Events {
@@ -214,6 +230,7 @@ impl Actions {
         self.playing.as_ref().is_some_and(|p| {
             matches!(p.action, Action::Attack { .. })
                 && (self.selected == 8
+                    || hobby_combo(self.selected, p.alternate(), self.free_alternate)
                     || (self.selected == 7
                         && p.alternate()
                         && p.stage != crate::weapon_rules::Stage::End))
@@ -553,11 +570,22 @@ impl Actions {
                 r.debit = f32::INFINITY;
                 r.sound = f32::INFINITY;
             }
+            let combo = attack && hobby_combo(self.selected, p.alternate(), self.free_alternate);
+            let (fired, sounded) = if combo {
+                let (h, w) = (p.combo_hits as usize, p.combo_swings as usize);
+                // Free, and its first hit comes before the alternate's usual payment point.
+                r.debit = 0.;
+                r.release = HOBBY_COMBO_HITS.get(h).copied().unwrap_or(f32::INFINITY);
+                r.sound = HOBBY_COMBO_SWINGS.get(w).copied().unwrap_or(f32::INFINITY);
+                (h >= HOBBY_COMBO_HITS.len(), w >= HOBBY_COMBO_SWINGS.len())
+            } else {
+                (p.fired, p.sounded)
+            };
             let mut until = p.duration - p.time;
             for (done, time) in [
                 (p.paid, r.debit),
-                (p.fired, r.release),
-                (p.sounded, r.sound),
+                (fired, r.release),
+                (sounded, r.sound),
             ] {
                 if !done {
                     until = until.min((time - p.time).max(0.));
@@ -590,13 +618,20 @@ impl Actions {
                     events.notice = Some("Pocket Watch / time stopped for 20 seconds");
                 }
             }
-            let fire = !p.fired && p.paid && p.time + 0.000001 >= r.release;
-            let sound = !p.sounded && p.time + 0.000001 >= r.sound;
-            if fire {
-                p.fired = true;
-            }
-            if sound {
-                p.sounded = true;
+            let fire = !fired && p.paid && p.time + 0.000001 >= r.release;
+            let sound = !sounded && p.time + 0.000001 >= r.sound;
+            if combo {
+                p.combo_hits += u8::from(fire);
+                p.combo_swings += u8::from(sound);
+                p.fired = p.combo_hits as usize >= HOBBY_COMBO_HITS.len();
+                p.sounded = p.combo_swings as usize >= HOBBY_COMBO_SWINGS.len();
+            } else {
+                if fire {
+                    p.fired = true;
+                }
+                if sound {
+                    p.sounded = true;
+                }
             }
             if fire || sound {
                 if attack {
@@ -607,7 +642,9 @@ impl Actions {
                     play: p.clone(),
                     at: dt.min(1.) - remaining,
                     anchors: None,
-                    pose: if fire && attack {
+                    pose: if fire && attack && combo {
+                        base.to_vec()
+                    } else if fire && attack {
                         let sample = self.clips[p.clip].sample(p.time, false);
                         let incoming = if self.selected == 4 && p.clip == 12 {
                             1.
@@ -670,7 +707,15 @@ impl Actions {
         self.tick_cooldowns(remaining);
         events.blade_return = std::mem::take(&mut self.return_pending);
         self.pose = base.to_vec();
-        if let Some(play) = &self.playing {
+        // The hobby-horse combo is posed entirely by the character's two-handed controller.
+        let combo = self
+            .playing
+            .as_ref()
+            .is_some_and(|p| {
+                matches!(p.action, Action::Attack { .. })
+                    && hobby_combo(self.selected, p.alternate(), self.free_alternate)
+            });
+        if let Some(play) = self.playing.as_ref().filter(|_| !combo) {
             let incoming = if self.selected == 4 && play.clip == 12 {
                 1.
             } else {
@@ -706,13 +751,19 @@ impl Actions {
             action,
             clip,
             time: 0.,
-            duration: action_duration(self.selected, stage, self.clips[clip].duration(), alternate),
+            duration: if hobby_combo(self.selected, alternate, self.free_alternate) {
+                HOBBY_COMBO_DURATION
+            } else {
+                action_duration(self.selected, stage, self.clips[clip].duration(), alternate)
+            },
             frame_time: self.clips[clip].frame_time,
             aim,
             fired: false,
             sounded: false,
             paid: false,
             stage,
+            combo_hits: 0,
+            combo_swings: 0,
         });
     }
     fn tick_cooldowns(&mut self, dt: f32) {
@@ -1750,6 +1801,9 @@ impl Visuals {
             let swipe = match (weapon, p.alternate()) {
                 (0, false) => (3.0..12.01).contains(&p.frame()),
                 (2, false) => (3.0..8.0).contains(&p.frame()),
+                (2, true) if self.hobby_horse => {
+                    HOBBY_COMBO_HITS.iter().any(|h| (h - 0.2..*h).contains(&p.time))
+                }
                 (2, true) => (10.0..18.0).contains(&p.frame()),
                 _ => false,
             };
@@ -3039,7 +3093,7 @@ mod tests {
         assert!(a.cooldowns[0] > 0.);
     }
     #[test]
-    fn hobby_horse_alternate_is_a_free_single_commit() {
+    fn hobby_horse_alternate_is_a_free_three_hit_combo() {
         let mut a = test_actions();
         a.selected = 2;
         a.available = [true; 10];
@@ -3047,11 +3101,15 @@ mod tests {
         let mut s = crate::inventory::Stats::weapon_preview();
         let before = s.will();
         let mut count = 0;
-        for frame in 0..240 {
+        let mut locked = false;
+        for frame in 0..480 {
             count += shots(&funded(&mut a, &mut s, 1. / 120., 2, (frame == 0).then_some(true)));
+            locked |= a.movement_locked();
             a.finish_frame();
         }
-        assert_eq!(count, 1);
+        assert_eq!(count, HOBBY_COMBO_HITS.len());
+        assert!(locked);
+        assert!(a.playing.is_none());
         assert!((s.will() - before).abs() < 0.001);
     }
     #[test]
@@ -3353,6 +3411,8 @@ mod tests {
                 sounded: false,
                 paid: false,
                 stage: Default::default(),
+                combo_hits: 0,
+                combo_swings: 0,
             };
             let (mut fires, mut sounds) = (0, 0);
             for _ in 0..rate * 2 {
@@ -3374,6 +3434,8 @@ mod tests {
             sounded: false,
             paid: false,
             stage: Default::default(),
+            combo_hits: 0,
+            combo_swings: 0,
         };
         assert!(!p.advance(0.).fire);
         assert!(p.advance(0.001).fire);
