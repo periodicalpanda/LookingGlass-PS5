@@ -190,6 +190,9 @@ pub struct Actions {
     jacks_clock: Option<[f32; 2]>,
     return_pending: bool,
     pub time_stopped: bool,
+    /// Hobby-horse pack: the Mallet's alternate attack is a melee jump slam, not a paid croquet
+    /// ball shot.
+    pub free_alternate: bool,
     // Backend capability gate. Rules for unfinished toys can be exercised by
     // headless checks without enabling pretend attacks in gameplay.
     available: [bool; 10],
@@ -358,6 +361,7 @@ impl Actions {
             jack_clock: None,
             jacks_clock: None,
             return_pending: false,
+            free_alternate: false,
             time_stopped: false,
             available: std::array::from_fn(supported),
         })
@@ -464,7 +468,10 @@ impl Actions {
                     let alt = canonical_mode(selected, held);
                     let variation =
                         self.variation.wrapping_mul(214013).wrapping_add(2531011) & 0xffff_ffff;
-                    let r = rule(selected, alt, (variation >> 16) & 0x7fff);
+                    let mut r = rule(selected, alt, (variation >> 16) & 0x7fff);
+                    if selected == 2 && alt && self.free_alternate {
+                        r.cost = 0.;
+                    }
                     let affordable = stats.as_deref().is_none_or(|s| {
                         s.god
                             || (s.will() >= r.cost
@@ -524,7 +531,11 @@ impl Actions {
             }
             let p = self.playing.as_ref().unwrap();
             let mut r = if attack {
-                rule(self.selected, p.alternate(), 0)
+                let mut r = rule(self.selected, p.alternate(), 0);
+                if self.selected == 2 && p.alternate() && self.free_alternate {
+                    r.cost = 0.;
+                }
+                r
             } else {
                 crate::weapon_rules::Rule {
                     clip: 0,
@@ -1205,6 +1216,8 @@ fn projectile_impact_sound(model: usize, flesh: bool) -> &'static str {
 }
 
 pub struct Visuals {
+    /// Hobby-horse pack: the Mallet's alternate attack hits in melee instead of launching a ball.
+    pub hobby_horse: bool,
     heavy: heavy::State,
     heavy_art: heavy_art::Art,
     ice: ice::State,
@@ -1471,6 +1484,7 @@ impl Visuals {
         let swipe_surface =
             crate::render_fx::register(assets, &swipe_texture, &[swipe_name.into()], &specs)?;
         Ok(Self {
+            hobby_horse: false,
             swipe_texture,
             _swipe_surface: swipe_surface,
             time_stopped: false,
@@ -1921,7 +1935,8 @@ impl Visuals {
                 self.dice.throw(self.dice_count, origin, aimed);
                 return;
             }
-            if weapon == 1 || p.alternate() {
+            let ball = weapon != 2 || !self.hobby_horse;
+            if weapon == 1 || (p.alternate() && ball) {
                 let raw = { self.props[weapon].point(combat_anchors[0], "tag_barrel", 1.) };
                 // Attachments can reach through a wall; trace from Alice before spawning a visual.
                 let (origin, aimed) =
@@ -2712,6 +2727,7 @@ pub(crate) fn test_actions_with_bones(bones: usize) -> Actions {
         jacks_clock: None,
         return_pending: false,
         time_stopped: false,
+        free_alternate: false,
         available: std::array::from_fn(supported),
     }
 }
@@ -3021,6 +3037,22 @@ mod tests {
         }
         assert_eq!(n, 0);
         assert!(a.cooldowns[0] > 0.);
+    }
+    #[test]
+    fn hobby_horse_alternate_is_a_free_single_commit() {
+        let mut a = test_actions();
+        a.selected = 2;
+        a.available = [true; 10];
+        a.free_alternate = true;
+        let mut s = crate::inventory::Stats::weapon_preview();
+        let before = s.will();
+        let mut count = 0;
+        for frame in 0..240 {
+            count += shots(&funded(&mut a, &mut s, 1. / 120., 2, (frame == 0).then_some(true)));
+            a.finish_frame();
+        }
+        assert_eq!(count, 1);
+        assert!((s.will() - before).abs() < 0.001);
     }
     #[test]
     fn all_toy_rules_have_single_commits_including_delayed_buss_and_channels() {

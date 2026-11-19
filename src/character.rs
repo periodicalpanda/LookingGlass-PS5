@@ -905,6 +905,9 @@ impl Character {
         // the other large weapons while idle and walking.
         self.animator.large = [4, 7, 8].contains(&weapon.selected)
             || (weapon.selected == 2 && self.two_hand.is_some());
+        // The hobby horse's alternate is a free melee jump slam, not a croquet ball shot.
+        self.actions.free_alternate = self.two_hand.is_some();
+        self.visuals.hobby_horse = self.two_hand.is_some();
         self.animator.unarmed = weapon.selected == crate::weapons::UNARMED;
         self.animator.update(
             if self.visuals.ice_locked() { 0. } else { dt },
@@ -1040,7 +1043,14 @@ impl Character {
                 .filter(|p| matches!(p.action, Action::Attack { .. }))
                 .map(|p| {
                     let alt = p.alternate();
-                    (p.time, p.duration, crate::weapon_rules::rule(2, alt, 0).release, alt)
+                    let swing = if alt {
+                        HhSwing::Jump
+                    } else if crate::weapons::ACTION_CLIPS[p.clip] == "mallet_att_3_prim_02" {
+                        HhSwing::Spin
+                    } else {
+                        HhSwing::Slam
+                    };
+                    (p.time, p.duration, crate::weapon_rules::rule(2, alt, 0).release, swing)
                 });
             grip.apply(dt, held, play, &self.skeleton, self.tags[0], &mut self.actions.pose);
         }
@@ -3360,6 +3370,13 @@ const HH_BEND: f32 = 0.2;
 const HH_CROUCH: f32 = 10.;
 /// Share of a leap the feet rise with the hips (the rest tucks the knees).
 const HH_TUCK: f32 = 0.75;
+/// Spin: how far she twists right to wind up, and the turn at which the horse passes in front.
+const HH_SPIN_WIND: f32 = 0.6;
+const HH_SPIN_FRONT: f32 = 0.8;
+/// Spin wind-up: horse cocked back low on her right.
+const HH_WIND: GripKey = GripKey { hand: vec3(2., -12., -6.), shaft: vec3(-0.6, -0.75, 0.1), face: vec3(0.6, -0.5, 0.) };
+/// Spin sweep: horse held straight out to her front-right at waist height, face leading.
+const HH_SWEEP: GripKey = GripKey { hand: vec3(14., -8., -6.), shaft: vec3(0.55, -0.83, 0.05), face: vec3(0.8, 0.5, 0.) };
 /// Jump slam: crouch before the leap, leap height, landing crouch and lean.
 const HH_JUMP_SET: f32 = 6.;
 const HH_JUMP: f32 = 22.;
@@ -3372,20 +3389,39 @@ const HH_GROUND: GripKey = GripKey { hand: vec3(13., -4., -13.), shaft: vec3(0.8
 const HH_RIGHT_POLE: Vec3 = vec3(-0.4, -1., -0.5);
 const HH_LEFT_POLE: Vec3 = vec3(-0.4, 1., -0.5);
 
-/// Body motion that goes with a beat: how far the hips drop (negative: rise, a jump) and how far
-/// the spine leans forward (radians, negative arches back).
+/// Body motion that goes with a beat: how far the hips drop (negative: rise, a jump), how far
+/// the spine leans forward (radians, negative arches back) and how far the whole body has turned
+/// about the hips (radians, positive to her left).
 #[derive(Clone, Copy, Default)]
 struct HhBody {
     drop: f32,
     bend: f32,
+    turn: f32,
 }
 impl HhBody {
     const fn new(drop: f32, bend: f32) -> Self {
-        Self { drop, bend }
+        Self { drop, bend, turn: 0. }
+    }
+    const fn turned(self, turn: f32) -> Self {
+        Self { turn, ..self }
     }
     fn lerp(self, other: Self, u: f32) -> Self {
-        Self { drop: self.drop + (other.drop - self.drop) * u, bend: self.bend + (other.bend - self.bend) * u }
+        Self {
+            drop: self.drop + (other.drop - self.drop) * u,
+            bend: self.bend + (other.bend - self.bend) * u,
+            turn: self.turn + (other.turn - self.turn) * u,
+        }
     }
+}
+/// Which Madness Returns swing an attack plays.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum HhSwing {
+    /// Overhead slam (first primary swing).
+    Slam,
+    /// Spinning sweep (second primary swing).
+    Spin,
+    /// Jump slam (alternate attack).
+    Jump,
 }
 /// One beat of a swing: blend from one placement to the next.
 struct HhBeat {
@@ -3460,6 +3496,34 @@ fn hh_jump_slam(time: f32, duration: f32, hit: f32) -> HhBeat {
         hh_recover(HH_GROUND, land, (time - hold) / recover)
     }
 }
+/// Madness Returns spinning sweep (second primary swing): wind up with the horse cocked back on
+/// her right, then pivot a full turn to her left with it held out at waist height, passing in
+/// front of her on the hit, and settle back into the carry.
+fn hh_spin(time: f32, duration: f32, hit: f32) -> HhBeat {
+    let hit = hit.clamp(0.2, duration.max(0.25));
+    let wind = hit * 0.43;
+    let around = (hit + (duration - hit) * 0.65).min(duration);
+    let set = HhBody::new(4., 0.1);
+    let wound = set.turned(-HH_SPIN_WIND);
+    let front = set.turned(HH_SPIN_FRONT);
+    let full = set.turned(std::f32::consts::TAU);
+    if time < wind {
+        let u = hh_smooth(time / wind);
+        HhBeat { from: HH_CARRY, to: HH_WIND, u, body: HhBody::default().lerp(wound, u) }
+    } else if time < hit {
+        let x = ((time - wind) / (hit - wind)).clamp(0., 1.);
+        let u = x * x * x;
+        HhBeat { from: HH_WIND, to: HH_SWEEP, u: hh_smooth(x * 1.6), body: wound.lerp(front, u) }
+    } else if time < around {
+        let x = ((time - hit) / (around - hit)).clamp(0., 1.);
+        let u = 1. - (1. - x).powf(1.5);
+        HhBeat { from: HH_SWEEP, to: HH_SWEEP, u: 1., body: front.lerp(full, u) }
+    } else {
+        // A full turn is the starting orientation again.
+        let u = hh_smooth((time - around) / (duration - around).max(1e-3));
+        HhBeat { from: HH_SWEEP, to: HH_CARRY, u, body: set.lerp(HhBody::default(), u) }
+    }
+}
 
 impl TwoHand {
     fn load(assets: &mut Assets, skeleton: &Skeleton) -> Option<Self> {
@@ -3525,10 +3589,11 @@ impl TwoHand {
         Transform { rotation, translation: hand - rotation * self.origin }
     }
     /// The tag transform the weapon should have this frame, in skeleton space, and the spine bend.
-    fn target(&self, play: Option<(f32, f32, f32, bool)>, world: &[Transform]) -> (Transform, HhBody) {
+    fn target(&self, play: Option<(f32, f32, f32, HhSwing)>, world: &[Transform]) -> (Transform, HhBody) {
         let beat = match play {
-            Some((time, duration, hit, false)) => hh_slam(time, duration, hit),
-            Some((time, duration, hit, true)) => hh_jump_slam(time, duration, hit),
+            Some((time, duration, hit, HhSwing::Slam)) => hh_slam(time, duration, hit),
+            Some((time, duration, hit, HhSwing::Spin)) => hh_spin(time, duration, hit),
+            Some((time, duration, hit, HhSwing::Jump)) => hh_jump_slam(time, duration, hit),
             None => HhBeat { from: HH_CARRY, to: HH_CARRY, u: 0., body: HhBody::default() },
         };
         let frame = self.chest_frame(world);
@@ -3546,7 +3611,7 @@ impl TwoHand {
         &mut self,
         dt: f32,
         held: bool,
-        play: Option<(f32, f32, f32, bool)>,
+        play: Option<(f32, f32, f32, HhSwing)>,
         skeleton: &Skeleton,
         tag: usize,
         pose: &mut [Transform],
@@ -3562,6 +3627,10 @@ impl TwoHand {
         // they rise with the body and the knees tuck.
         let world = skeleton.global_pose(pose);
         let (_, body) = self.target(play, &world);
+        if body.turn != 0. && skeleton.bones[self.root].parent.is_none() {
+            pose[self.root].rotation = (Quat::from_rotation_z(body.turn * w) * pose[self.root].rotation).normalize();
+        }
+        let world = skeleton.global_pose(pose);
         if body.drop != 0. && skeleton.bones[self.root].parent.is_none() {
             let feet = self.legs.map(|l| world[l[2]]);
             let drop = body.drop * w;
@@ -3689,7 +3758,7 @@ mod hobby_probe {
         let mut worst = [0f32; 4];
         // Offline check: HOBBY_DATA=<folder with alice_baseframe.skb and the clips>,
         // HOBBY_TWOHAND=<twohand.txt>, HOBBY_OUT=<dump folder for tools/hobbyhorse_render.py>.
-        let mut cases: Vec<(String, Vec<Transform>, Option<(f32, f32, f32, bool)>)> = Vec::new();
+        let mut cases: Vec<(String, Vec<Transform>, Option<(f32, f32, f32, HhSwing)>)> = Vec::new();
         for n in ["ready_bw", "walk_bigwep", "run_bigwep"] {
             let c = clip(n);
             for k in 0..8 {
@@ -3704,8 +3773,9 @@ mod hobby_probe {
             let mut t = 0.;
             let mut k = 0;
             while t <= dur + 1e-4 {
-                let alt = n.ends_with("_alt");
-                cases.push((format!("{n}_{k:02}"), c.sample(t, false), Some((t, dur, if alt { 0.65 } else { 0.35 }, alt))));
+                let swing = if n.ends_with("_alt") { HhSwing::Jump } else if n.ends_with("_02") { HhSwing::Spin } else { HhSwing::Slam };
+                let hit = if swing == HhSwing::Jump { 0.65 } else { 0.35 };
+                cases.push((format!("{n}_{k:02}"), c.sample(t, false), Some((t, dur, hit, swing))));
                 t += 1. / 30.;
                 k += 1;
             }
