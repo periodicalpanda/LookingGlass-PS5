@@ -1,5 +1,8 @@
 """Build a data-pack override that reskins the Croquet Mallet as a hobby horse.
 
+The pack also marks the mallet as a long two-handed weapon: it then uses the large-weapon stance
+(the Ice Wand's two-handed idle/walk) and an off-hand reach during swings.
+
 Everything is read from files you supply; no game or third-party art lives in this repository.
 
   python tools/hobbyhorse_pack.py --obj horse.obj --texture horse_diffuse.png \
@@ -50,9 +53,9 @@ def main():
     ap.add_argument("--texture", required=True)
     ap.add_argument("--template", required=True, help="original models/weapons/mallet/notmoving.tan")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--length", type=float, default=72.0, help="whole-model length in game units")
-    ap.add_argument("--grip", type=float, default=0.30, help="right-hand grip as a fraction of the length from the butt")
-    ap.add_argument("--left-hand", type=float, default=-14.0, help="off-hand position along the shaft (weapon +X, game units)")
+    ap.add_argument("--length", type=float, default=64.0, help="whole-model length in game units")
+    ap.add_argument("--grip", type=float, default=0.125, help="right-hand grip as a fraction of the length from the butt")
+    ap.add_argument("--left-hand", type=float, default=18.0, help="off-hand position along the shaft (weapon +X, game units)")
     ap.add_argument("--tex-size", type=int, default=512)
     ap.add_argument("--flip-v", type=int, default=1)
     ap.add_argument("--roll", type=float, default=0.0, help="degrees of roll about the shaft")

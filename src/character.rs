@@ -901,7 +901,10 @@ impl Character {
         if weapon.selected == 6 && !self.visuals.dice.ready() {
             weapon.click = None;
         }
-        self.animator.large = [4, 7, 8].contains(&weapon.selected);
+        // A long Mallet mesh (data pack with twohand.txt) uses the authored two-handed stance of
+        // the other large weapons while idle and walking.
+        self.animator.large = [4, 7, 8].contains(&weapon.selected)
+            || (weapon.selected == 2 && self.two_hand.is_some());
         self.animator.unarmed = weapon.selected == crate::weapons::UNARMED;
         self.animator.update(
             if self.visuals.ice_locked() { 0. } else { dt },
@@ -1024,7 +1027,10 @@ impl Character {
             &power_mask,
         );
         if let Some(grip) = &mut self.two_hand {
-            let held = self.actions.equipment().0 == 2 && self.actions.equipment().1 > 0.5;
+            // Swing clips are one-handed; reach the off hand onto the shaft while one plays.
+            let held = self.actions.equipment().0 == 2
+                && self.actions.equipment().1 > 0.5
+                && self.actions.playing.is_some();
             grip.apply(dt, held, &self.skeleton, self.tags[0], self.scale, &mut self.actions.pose);
         }
         self.foot_rig.apply(
@@ -3317,7 +3323,12 @@ impl TwoHand {
         let shoulder = world[upper].translation;
         let elbow = world[fore].translation;
         let wrist = world[hand].translation;
-        let goal = world[tag].point(Vec3::X * self.offset / scale);
+        // Grip the shaft where it passes nearest the left shoulder (within a band around the
+        // authored offset) so the hand meets the shaft instead of stopping short of it.
+        let axis_dir = world[tag].rotation * Vec3::X;
+        let along_shaft = (shoulder - world[tag].translation).dot(axis_dir) * scale;
+        let grip = along_shaft.clamp(self.offset - 6., self.offset + 6.);
+        let goal = world[tag].translation + axis_dir * (grip / scale);
         let (l1, l2) = ((elbow - shoulder).length(), (wrist - elbow).length());
         let to_goal = goal - shoulder;
         let d = to_goal.length().clamp((l1 - l2).abs() + 0.01, l1 + l2 - 0.01);
