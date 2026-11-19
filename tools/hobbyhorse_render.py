@@ -21,7 +21,7 @@ for j,n in enumerate(names):
         ax=axs[i,j]; pts=np.vstack([A,P,L]); col=np.r_[np.zeros(len(A)),np.ones(len(P)+len(L))]
         dd=depth(pts); o=np.argsort(dd)
         x,y=proj(pts[o]); ax.scatter(x,y,s=0.6,c=np.where(col[o]>0,'#c08000','#2050a0'),alpha=0.55,linewidths=0)
-        ax.axhline(0,color='k',lw=0.5); ax.set_aspect('equal'); ax.set_xlim(-55,55); ax.set_ylim(-5,95); ax.set_xticks([]); ax.set_yticks([])
+        ax.axhline(0,color='k',lw=0.5); ax.set_aspect('equal'); ax.set_xlim(-55,55); ax.set_ylim(-5,125); ax.set_xticks([]); ax.set_yticks([])
         if i==0: ax.set_title(n.replace('mallet_att_3_prim_','swing'),fontsize=7)
         if j==0: ax.set_ylabel(vn,fontsize=8)
 plt.tight_layout(); plt.savefig(out,dpi=110)
