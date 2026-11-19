@@ -1,7 +1,8 @@
 """Build a data-pack override that reskins the Croquet Mallet as a hobby horse.
 
-The pack also marks the mallet as a long two-handed weapon: it then uses the large-weapon stance
-(the Ice Wand's two-handed idle/walk) and an off-hand reach during swings.
+The pack also marks the mallet as a long two-handed weapon (twohand.txt): the game then poses both
+arms procedurally, carrying it across the hips and swinging it in an overhead slam as in Madness
+Returns (src/character.rs, TwoHand).
 
 Everything is read from files you supply; no game or third-party art lives in this repository.
 
@@ -53,13 +54,13 @@ def main():
     ap.add_argument("--texture", required=True)
     ap.add_argument("--template", required=True, help="original models/weapons/mallet/notmoving.tan")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--hand-r", default="-0.3,-0.4,3.1", help="right-hand grip point in weapon space (measured from the authored two-handed clips)")
-    ap.add_argument("--hand-l", default="14.5,3.7,-0.5", help="left-hand grip point in weapon space")
-    ap.add_argument("--butt", type=float, default=-17.0, help="shaft butt, in units behind the right hand along the shaft")
-    ap.add_argument("--head-base", type=float, default=28.0, help="where the head starts along the shaft, from the right hand")
-    ap.add_argument("--head-scale", type=float, default=38.5, help="game units per OBJ unit for the head")
+    ap.add_argument("--hand-r", default="0,0,0", help="right palm on the shaft in weapon space (the original mallet grip is the tag origin)")
+    ap.add_argument("--hand-l", default="1,0,0", help="a second shaft point: the shaft runs from --hand-r through it towards the head (original mallet handle is weapon +x)")
+    ap.add_argument("--butt", type=float, default=-24.0, help="shaft butt, in units behind the right hand along the shaft")
+    ap.add_argument("--head-base", type=float, default=6.0, help="where the head starts along the shaft, from the right hand (Madness Returns: right hand near the head)")
+    ap.add_argument("--head-scale", type=float, default=27.0, help="game units per OBJ unit for the head (Madness Returns proportions next to Alice)")
     ap.add_argument("--head-start", type=float, default=0.12, help="OBJ shaft coordinate where the head begins")
-    ap.add_argument("--left-hand-range", default="10,20", help="off-hand sliding range along the shaft during swings")
+    ap.add_argument("--left-hand-range", default="-16,-10", help="signed range along the shaft where the left palm grips (behind the right hand)")
     ap.add_argument("--tex-size", type=int, default=512)
     ap.add_argument("--flip-v", type=int, default=1)
     ap.add_argument("--roll", type=float, default=0.0, help="degrees of roll about the shaft")

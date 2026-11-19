@@ -1027,18 +1027,19 @@ impl Character {
             &power_mask,
         );
         if let Some(grip) = &mut self.two_hand {
-            // Swing clips are one-handed; reach the off hand onto the shaft while one plays.
+            // Long Mallet mesh: both arms follow the procedural carry and overhead slam.
             let held = self.actions.equipment().0 == 2
                 && self.actions.equipment().1 > 0.5
-                && self.actions.playing.is_some();
+                && !first_person
+                && !player.swimming
+                && !player.climbing();
             let play = self
                 .actions
                 .playing
                 .as_ref()
-                .filter(|p| held && !first_person && matches!(p.action, Action::Attack { .. }))
+                .filter(|p| matches!(p.action, Action::Attack { .. }))
                 .map(|p| (p.time, p.duration, crate::weapon_rules::rule(2, p.alternate(), 0).release));
-            grip.slam(play, &self.skeleton, self.tags[0], &mut self.actions.pose);
-            grip.apply(dt, held, &self.skeleton, self.tags[0], self.scale, &mut self.actions.pose);
+            grip.apply(dt, held, play, &self.skeleton, self.tags[0], &mut self.actions.pose);
         }
         self.foot_rig.apply(
             &self.skeleton,
@@ -3300,25 +3301,101 @@ impl Burn {
     }
 }
 
-/// Two-bone reach of the left arm onto a long Mallet shaft during one-handed swing clips. Enabled
-/// only by a data pack that ships `models/weapons/mallet/twohand.txt`: shaft origin (x y z),
-/// shaft direction (x y z) in weapon space, then the off-hand's sliding range along the shaft.
-/// The stock one-handed mallet is untouched.
+/// Procedural two-handed carry and overhead slam for a long Mallet mesh (the Madness Returns
+/// hobby horse). Enabled only by a data pack that ships `models/weapons/mallet/twohand.txt`:
+/// shaft origin (x y z) and direction (x y z, towards the head) in weapon space, then the signed
+/// range along the shaft where the off hand may grip. The weapon's muzzle is weapon +Y.
+///
+/// Both arms are posed every frame from keyed weapon placements in a chest frame (origin between
+/// the shoulders, +X forward, +Y left, +Z up the spine). The weapon hangs from `tag_weapon`, so
+/// the right hand is solved from the keyed weapon placement; the left palm (`tag_ball_linked`)
+/// is put on the shaft with its knuckles along it. The stock one-handed mallet is untouched.
 struct TwoHand {
-    bones: [usize; 3],
+    left: [usize; 3],
     right: [usize; 3],
-    left_shoulder: usize,
-    /// Weapon-tag rotation and its offset from the chest centre, captured from the last frame
-    /// outside a swing, so the procedural slam starts and ends on the carried pose.
-    carry: Option<(Quat, Vec3)>,
+    left_palm: usize,
+    left_knuckles: [usize; 2],
+    spine: usize,
+    root: usize,
+    legs: [[usize; 3]; 2],
     origin: Vec3,
     direction: Vec3,
+    muzzle: Vec3,
     range: (f32, f32),
     weight: f32,
 }
+
+/// One keyed weapon placement in the chest frame: where the right palm holds the shaft, the shaft
+/// direction (butt to head) and where the horse's face points.
+#[derive(Clone, Copy)]
+struct GripKey {
+    hand: Vec3,
+    shaft: Vec3,
+    face: Vec3,
+}
+impl GripKey {
+    fn rotation(self) -> Quat {
+        let s = self.shaft.normalize();
+        let f = (self.face - s * s.dot(self.face)).normalize();
+        Quat::from_mat3(&macroquad::math::Mat3::from_cols(s, f, s.cross(f)))
+    }
+}
+/// Madness Returns idle: shaft across the hips, head out on Alice's right at waist height, face
+/// down and out, right hand near the head, left hand towards the butt by the left hip.
+const HH_CARRY: GripKey = GripKey { hand: vec3(9., -9., -14.), shaft: vec3(0.25, -0.95, 0.12), face: vec3(0.1, -0.2, -1.) };
+/// Wind-up: brought up over the right shoulder, head up and back.
+const HH_LIFT: GripKey = GripKey { hand: vec3(4., -9., 2.), shaft: vec3(-0.35, -0.25, 0.9), face: vec3(1., 0., 0.3) };
+/// Top of the swing: right arm up, horse vertical above her, face forward.
+const HH_RAISE: GripKey = GripKey { hand: vec3(3., -5., 17.), shaft: vec3(-0.25, 0.05, 1.), face: vec3(1., 0., 0.) };
+/// Impact: slammed down in front of her feet, shaft near vertical, hands low at the chest.
+const HH_IMPACT: GripKey = GripKey { hand: vec3(12., -3., -12.), shaft: vec3(0.25, 0.05, -1.), face: vec3(-1., 0., -0.3) };
+/// Recovery: lifted off the floor and swung back out to the right side.
+const HH_RECOVER: GripKey = GripKey { hand: vec3(12., -8., -12.), shaft: vec3(0.6, -0.65, -0.3), face: vec3(0.2, 0., -1.) };
+/// Forward bend of the spine at impact.
+const HH_BEND: f32 = 0.2;
+/// How far the hips drop (knees bend, feet stay planted) at impact.
+const HH_CROUCH: f32 = 10.;
+const HH_RIGHT_POLE: Vec3 = vec3(-0.4, -1., -0.5);
+const HH_LEFT_POLE: Vec3 = vec3(-0.4, 1., -0.5);
+
+/// Swing timeline as (from, to, eased weight, impact share) for an attack at `time` of
+/// `duration` whose hit lands at `hit`.
+fn hh_timeline(time: f32, duration: f32, hit: f32) -> (GripKey, GripKey, f32, f32) {
+    let smooth = |x: f32| {
+        let x = x.clamp(0., 1.);
+        x * x * (3. - 2. * x)
+    };
+    let hit = hit.clamp(0.15, duration.max(0.2));
+    let lift = hit * 0.30;
+    let raise = hit * 0.60;
+    let recover = 0.25f32.min((duration - hit) * 0.5).max(0.);
+    let hold = (duration - recover).max(hit);
+    if time < lift {
+        (HH_CARRY, HH_LIFT, smooth(time / lift), 0.)
+    } else if time < raise {
+        (HH_LIFT, HH_RAISE, smooth((time - lift) / (raise - lift)), 0.)
+    } else if time < hit {
+        let x = ((time - raise) / (hit - raise)).clamp(0., 1.);
+        (HH_RAISE, HH_IMPACT, x * x, x * x)
+    } else if time < hold || recover <= 0. {
+        (HH_IMPACT, HH_IMPACT, 1., 1.)
+    } else {
+        let x = ((time - hold) / recover).clamp(0., 1.);
+        if x < 0.4 {
+            let u = smooth(x / 0.4);
+            (HH_IMPACT, HH_RECOVER, u, 1. - u)
+        } else {
+            (HH_RECOVER, HH_CARRY, smooth((x - 0.4) / 0.6), 0.)
+        }
+    }
+}
+
 impl TwoHand {
     fn load(assets: &mut Assets, skeleton: &Skeleton) -> Option<Self> {
         let text = String::from_utf8(assets.read("models/weapons/mallet/twohand.txt").ok()?).ok()?;
+        Self::parse(&text, skeleton)
+    }
+    fn parse(text: &str, skeleton: &Skeleton) -> Option<Self> {
         let n = text
             .split_whitespace()
             .map(|v| v.parse::<f32>().ok().filter(|v| v.is_finite() && v.abs() < 500.))
@@ -3330,93 +3407,140 @@ impl TwoHand {
         if direction.length() < 0.5 {
             return None;
         }
+        let direction = direction.normalize();
+        let muzzle = (Vec3::Y - direction * direction.y).try_normalize()?;
         let find = |n: &str| skeleton.bones.iter().position(|b| b.name == n);
         Some(Self {
-            bones: [find("Bip01 L UpperArm")?, find("Bip01 L Forearm")?, find("Bip01 L Hand")?],
+            left: [find("Bip01 L UpperArm")?, find("Bip01 L Forearm")?, find("Bip01 L Hand")?],
             right: [find("Bip01 R UpperArm")?, find("Bip01 R Forearm")?, find("Bip01 R Hand")?],
-            left_shoulder: find("Bip01 L UpperArm")?,
-            carry: None,
+            left_palm: find("tag_ball_linked")?,
+            left_knuckles: [find("Bip01 L Finger1")?, find("Bip01 L Finger2")?],
+            spine: find("Bip01 Spine1")?,
+            root: find("Bip01")?,
+            legs: [
+                [find("Bip01 L Thigh")?, find("Bip01 L Calf")?, find("Bip01 L Foot")?],
+                [find("Bip01 R Thigh")?, find("Bip01 R Calf")?, find("Bip01 R Foot")?],
+            ],
             origin: vec3(n[0], n[1], n[2]),
-            direction: direction.normalize(),
+            direction,
+            muzzle,
             range: (n[6].min(n[7]), n[6].max(n[7])),
             weight: 0.,
         })
     }
-    /// Procedural overhead slam: Alice's authored swing clips are one-handed, so while one plays
-    /// the right arm is driven along wind-up, slam and recovery keys timed to the hit frame, and
-    /// the weapon tag follows. Outside swings this only records the carried pose.
-    fn slam(&mut self, play: Option<(f32, f32, f32)>, skeleton: &Skeleton, tag: usize, pose: &mut [Transform]) {
-        let [ru, rf, rh] = self.right;
-        let world = skeleton.global_pose(pose);
-        let centre = (world[ru].translation + world[self.left_shoulder].translation) * 0.5;
-        let Some((time, duration, hit)) = play else {
-            self.carry = Some((world[tag].rotation, world[tag].translation - centre));
-            return;
-        };
-        let Some((r0, offset)) = self.carry else { return };
-        let arm = (world[rf].translation - world[ru].translation).length()
-            + (world[rh].translation - world[rf].translation).length();
-        if arm <= 0. || !hit.is_finite() || hit <= 0.05 {
-            return;
+    /// Chest frame of the current pose: origin between the shoulders, +Z straight up, +Y along
+    /// the shoulders (left) kept level, +X forward. Staying upright keeps the keys meaningful
+    /// while the swing clips and the slam bend the spine.
+    fn chest_frame(&self, world: &[Transform]) -> Transform {
+        let (l, r) = (world[self.left[0]].translation, world[self.right[0]].translation);
+        let y = vec3(l.x - r.x, l.y - r.y, 0.).try_normalize().unwrap_or(Vec3::Y);
+        Transform {
+            rotation: Quat::from_mat3(&macroquad::math::Mat3::from_cols(y.cross(Vec3::Z), y, Vec3::Z)).normalize(),
+            translation: (l + r) * 0.5,
         }
-        let smooth = |x: f32| {
-            let x = x.clamp(0., 1.);
-            x * x * (3. - 2. * x)
-        };
-        // The swing action ends soon after the hit; finish the return inside it so the arm never
-        // snaps back to the carried pose when the clip stops.
-        let end = (hit + 0.20).min(duration - 0.01).max(hit + 0.10);
-        let rest = (hit + 0.05).min(end - 0.08);
-        let wind_at = (hit - 0.22).max(0.10);
-        let d0 = (r0 * self.direction).normalize();
-        let wind_d = vec3(-0.26, 0., 0.97).normalize();
-        let hit_d = vec3(0.82, 0., -0.57).normalize();
-        let carry_p = centre + offset;
-        let wind_p = centre + vec3(-0.05, 0., 0.95) * arm;
-        let hit_p = centre + vec3(0.85, 0., -0.45) * arm;
-        let turn = |a: Vec3, b: Vec3, u: f32| Quat::IDENTITY.slerp(Quat::from_rotation_arc(a, b), u) * a;
-        let (dir, at) = if time < wind_at {
-            let u = smooth(time / wind_at);
-            (turn(d0, wind_d, u), carry_p.lerp(wind_p, u))
-        } else if time < hit {
-            let x = (time - wind_at) / (hit - wind_at);
-            let u = x * x;
-            (turn(wind_d, hit_d, u), wind_p.lerp(hit_p, u))
-        } else if time < rest {
-            (hit_d, hit_p)
-        } else {
-            let u = smooth((time - rest) / (end - rest));
-            (turn(hit_d, d0, u), hit_p.lerp(carry_p, u))
-        };
-        let target = Quat::from_rotation_arc(d0, dir.normalize()) * r0;
-        let hand_rot = world[rh].rotation;
-        let local = hand_rot.inverse() * (world[tag].translation - world[rh].translation);
-        let rel = hand_rot.inverse() * world[tag].rotation;
-        let hand_target = (target * rel.inverse()).normalize();
-        reach_arm(skeleton, self.right, at - hand_target * local, 1., pose);
-        let world = skeleton.global_pose(pose);
-        let parent = skeleton.bones[rh].parent.map_or(Quat::IDENTITY, |p| world[p].rotation);
-        pose[rh].rotation = (parent.inverse() * hand_target).normalize();
     }
-    fn apply(&mut self, dt: f32, held: bool, skeleton: &Skeleton, tag: usize, scale: f32, pose: &mut [Transform]) {
+    /// Weapon-tag placement in the chest frame for a keyed blend.
+    fn placement(&self, a: GripKey, b: GripKey, u: f32, shoulder: Vec3) -> Transform {
+        // Hands travel on arcs around the right shoulder, not straight through the body.
+        let (da, db) = (a.hand - shoulder, b.hand - shoulder);
+        let dir = Quat::IDENTITY.slerp(Quat::from_rotation_arc(da.normalize(), db.normalize()), u) * da.normalize();
+        let hand = shoulder + dir * (da.length() + (db.length() - da.length()) * u);
+        let (qa, mut qb) = (a.rotation(), b.rotation());
+        if qa.dot(qb) < 0. {
+            qb = -qb;
+        }
+        let weapon = Quat::from_mat3(&macroquad::math::Mat3::from_cols(self.direction, self.muzzle, self.direction.cross(self.muzzle)));
+        let rotation = (qa.slerp(qb, u) * weapon.inverse()).normalize();
+        Transform { rotation, translation: hand - rotation * self.origin }
+    }
+    /// The tag transform the weapon should have this frame, in skeleton space, and the spine bend.
+    fn target(&self, play: Option<(f32, f32, f32)>, world: &[Transform]) -> (Transform, f32) {
+        let (a, b, u, impact) = match play {
+            Some((time, duration, hit)) => hh_timeline(time, duration, hit),
+            None => (HH_CARRY, HH_CARRY, 0., 0.),
+        };
+        let frame = self.chest_frame(world);
+        let shoulder = frame.rotation.inverse() * (world[self.right[0]].translation - frame.translation);
+        let local = self.placement(a, b, u, shoulder);
+        (
+            Transform {
+                rotation: (frame.rotation * local.rotation).normalize(),
+                translation: frame.point(local.translation),
+            },
+            impact * HH_BEND,
+        )
+    }
+    fn apply(
+        &mut self,
+        dt: f32,
+        held: bool,
+        play: Option<(f32, f32, f32)>,
+        skeleton: &Skeleton,
+        tag: usize,
+        pose: &mut [Transform],
+    ) {
         let target = if held { 1. } else { 0. };
-        self.weight += (target - self.weight).clamp(-dt / 0.15, dt / 0.15);
-        if self.weight <= 0. || scale <= 0. {
+        self.weight += (target - self.weight).clamp(-dt.max(0.) / 0.15, dt.max(0.) / 0.15);
+        if self.weight <= 0. {
             return;
         }
+        let w = self.weight;
+        let parent_rot = |i: usize, world: &[Transform]| skeleton.bones[i].parent.map_or(Quat::IDENTITY, |p| world[p].rotation);
+        // Crouch and lean into the slam.
         let world = skeleton.global_pose(pose);
-        let shoulder = world[self.bones[0]].translation;
-        // Grip the shaft where it passes nearest the left shoulder, inside the off-hand's range.
-        let anchor = world[tag].point(self.origin / scale);
-        let axis_dir = world[tag].rotation * self.direction;
-        let along = ((shoulder - anchor).dot(axis_dir) * scale).clamp(self.range.0, self.range.1);
-        let goal = anchor + axis_dir * (along / scale);
-        reach_arm(skeleton, self.bones, goal, self.weight, pose);
+        let (_, bend) = self.target(play, &world);
+        if bend > 0. && skeleton.bones[self.root].parent.is_none() {
+            let feet = self.legs.map(|l| world[l[2]]);
+            pose[self.root].translation.z -= HH_CROUCH * (bend / HH_BEND) * w;
+            for (leg, foot) in self.legs.iter().zip(feet) {
+                reach_arm(skeleton, *leg, foot.translation, Some(Vec3::X), 1., pose);
+                let world = skeleton.global_pose(pose);
+                pose[leg[2]].rotation = (parent_rot(leg[2], &world).inverse() * foot.rotation).normalize();
+            }
+        }
+        let world = skeleton.global_pose(pose);
+        if bend > 0. {
+            let left = self.chest_frame(&world).rotation * Vec3::Y;
+            let g = (Quat::from_axis_angle(left, bend * w) * world[self.spine].rotation).normalize();
+            pose[self.spine].rotation = (parent_rot(self.spine, &world).inverse() * g).normalize();
+        }
+        let world = skeleton.global_pose(pose);
+        let (goal, _) = self.target(play, &world);
+        let frame = self.chest_frame(&world).rotation;
+        let goal = world[tag].blend(goal, w);
+        // Right hand: the weapon hangs from tag_weapon, so solve the hand from the weapon.
+        let [_, _, rh] = self.right;
+        let rel = Transform {
+            rotation: world[rh].rotation.inverse() * world[tag].rotation,
+            translation: world[rh].rotation.inverse() * (world[tag].translation - world[rh].translation),
+        };
+        let hand_rot = (goal.rotation * rel.rotation.inverse()).normalize();
+        let wrist = goal.translation - hand_rot * rel.translation;
+        reach_arm(skeleton, self.right, wrist, Some(frame * HH_RIGHT_POLE), 1., pose);
+        let world = skeleton.global_pose(pose);
+        pose[rh].rotation = (parent_rot(rh, &world).inverse() * hand_rot).normalize();
+        // Left palm on the shaft, nearest the left shoulder inside the grip range.
+        let world = skeleton.global_pose(pose);
+        let start = world[tag].point(self.origin);
+        let axis = world[tag].rotation * self.direction;
+        let along = (world[self.left[0]].translation - start).dot(axis).clamp(self.range.0, self.range.1);
+        let grip = start + axis * along;
+        let [_, _, lh] = self.left;
+        let knuckles = world[self.left_knuckles[0]].translation - world[self.left_knuckles[1]].translation;
+        let turn = Quat::from_rotation_arc(knuckles.try_normalize().unwrap_or(axis), axis);
+        let left_rot = (turn * world[lh].rotation).normalize();
+        let palm = world[lh].rotation.inverse() * (world[self.left_palm].translation - world[lh].translation);
+        let left_rot = world[lh].rotation.slerp(left_rot, w).normalize();
+        let wrist = world[lh].translation.lerp(grip - left_rot * palm, w);
+        reach_arm(skeleton, self.left, wrist, Some(frame * HH_LEFT_POLE), 1., pose);
+        let world = skeleton.global_pose(pose);
+        pose[lh].rotation = (parent_rot(lh, &world).inverse() * left_rot).normalize();
     }
 }
 
-/// Two-bone reach of one arm: put the wrist at `goal`, keeping the animation's elbow side.
-fn reach_arm(skeleton: &Skeleton, bones: [usize; 3], goal: Vec3, weight: f32, pose: &mut [Transform]) {
+/// Two-bone reach of one arm: put the wrist at `goal`, bending the elbow towards `pole`
+/// (or the animation's elbow side).
+fn reach_arm(skeleton: &Skeleton, bones: [usize; 3], goal: Vec3, pole: Option<Vec3>, weight: f32, pose: &mut [Transform]) {
     let [upper, fore, hand] = bones;
     let world = skeleton.global_pose(pose);
     let shoulder = world[upper].translation;
@@ -3424,15 +3548,18 @@ fn reach_arm(skeleton: &Skeleton, bones: [usize; 3], goal: Vec3, weight: f32, po
     let wrist = world[hand].translation;
     let (l1, l2) = ((elbow - shoulder).length(), (wrist - elbow).length());
     let to_goal = goal - shoulder;
-    let d = to_goal.length().clamp((l1 - l2).abs() + 0.01, l1 + l2 - 0.01);
     if l1 <= 0. || l2 <= 0. || to_goal.length() < 1e-4 {
         return;
     }
+    let d = to_goal.length().clamp((l1 - l2).abs() + 0.01, l1 + l2 - 0.01);
     let axis = to_goal / to_goal.length();
-    // Keep the animation's elbow side as the pole.
-    let mut pole = (elbow - shoulder) - axis * (elbow - shoulder).dot(axis);
+    let side = pole.unwrap_or(elbow - shoulder);
+    let mut pole = side - axis * side.dot(axis);
     if pole.length() < 1e-4 {
-        pole = Vec3::NEG_Z;
+        pole = (elbow - shoulder) - axis * (elbow - shoulder).dot(axis);
+    }
+    if pole.length() < 1e-4 {
+        pole = Vec3::NEG_Z - axis * Vec3::NEG_Z.dot(axis);
     }
     let pole = pole.normalize();
     let reach = (l1 * l1 - l2 * l2 + d * d) / (2. * d);
@@ -3450,4 +3577,97 @@ fn reach_arm(skeleton: &Skeleton, bones: [usize; 3], goal: Vec3, weight: f32, po
     let q2 = swing(wrist2 - elbow2, tip - elbow2);
     let g2 = (q2 * world[fore].rotation).normalize();
     pose[fore].rotation = pose[fore].rotation.slerp((parent_rot(fore, &world).inverse() * g2).normalize(), weight);
+}
+
+#[cfg(test)]
+mod hobby_probe {
+    use super::*;
+    fn dir() -> Option<std::path::PathBuf> {
+        std::env::var("HOBBY_DATA").ok().map(std::path::PathBuf::from)
+    }
+    fn skin(sk: &Skeleton, world: &[Transform]) -> Vec<f32> {
+        let mut out = Vec::new();
+        for (si, s) in sk.surfaces.iter().enumerate() {
+            if ["material15", "material16", "material17"].contains(&s.name.as_str()) {
+                continue;
+            }
+            for v in &s.vertices {
+                let p: Vec3 = v.weights.iter().map(|w| world[w.bone].point(w.offset) * w.amount).sum();
+                out.extend([p.x, p.y, p.z, si as f32]);
+            }
+        }
+        out
+    }
+    /// Runs the hobby-horse controller over the real clips and reports contact errors.
+    #[test]
+    fn controller() {
+        let Some(d) = dir() else { return };
+        let out = std::path::PathBuf::from(std::env::var("HOBBY_OUT").unwrap());
+        std::fs::create_dir_all(&out).unwrap();
+        let sk = Skeleton::parse(&std::fs::read(d.join("alice_baseframe.skb")).unwrap()).unwrap();
+        let clip = |n: &str| Animation::parse(&std::fs::read(d.join(format!("{n}.ska"))).unwrap(), sk.bones.len()).unwrap();
+        let text = std::fs::read_to_string(std::env::var("HOBBY_TWOHAND").unwrap()).unwrap();
+        let mut hh = TwoHand::parse(&text, &sk).expect("twohand");
+        hh.weight = 1.;
+        let tag = sk.bones.iter().position(|b| b.name == "tag_weapon").unwrap();
+        let mut report = String::new();
+        let mut worst = [0f32; 4];
+        // Offline check: HOBBY_DATA=<folder with alice_baseframe.skb and the clips>,
+        // HOBBY_TWOHAND=<twohand.txt>, HOBBY_OUT=<dump folder for tools/hobbyhorse_render.py>.
+        let mut cases: Vec<(String, Vec<Transform>, Option<(f32, f32, f32)>)> = Vec::new();
+        for n in ["ready_bw", "walk_bigwep", "run_bigwep"] {
+            let c = clip(n);
+            for k in 0..8 {
+                let t = c.duration() * k as f32 / 8.;
+                cases.push((format!("{n}_{k}"), c.sample(t, true), None));
+            }
+        }
+        for n in ["mallet_att_3_prim_01", "mallet_att_3_prim_02"] {
+            let c = clip(n);
+            let dur = c.duration();
+            report += &format!("{n} duration {dur:.3}\n");
+            let mut t = 0.;
+            let mut k = 0;
+            while t <= dur + 1e-4 {
+                cases.push((format!("{n}_{k:02}"), c.sample(t, false), Some((t, dur, 0.35))));
+                t += 1. / 30.;
+                k += 1;
+            }
+        }
+        for (name, mut pose, play) in cases {
+            hh.apply(0.0, true, play, &sk, tag, &mut pose);
+            let world = sk.global_pose(&pose);
+            let (goal, _) = hh.target(play, &world);
+            // Right palm: weapon tag vs keyed goal.
+            let r_err = (world[tag].translation - goal.translation).length();
+            let r_rot = world[tag].rotation.angle_between(goal.rotation).to_degrees();
+            // Left palm distance to the shaft line and grip position along it.
+            let start = world[tag].point(hh.origin);
+            let axis = world[tag].rotation * hh.direction;
+            let lp = world[hh.left_palm].translation;
+            let along = (lp - start).dot(axis);
+            let off = ((lp - start) - axis * along).length();
+            let out_of_range = (hh.range.0 - along).max(along - hh.range.1).max(0.);
+            let l_err = off + out_of_range;
+            let reach_l = (lp - world[hh.left[0]].translation).length();
+            worst[0] = worst[0].max(r_err);
+            worst[1] = worst[1].max(r_rot);
+            worst[2] = worst[2].max(l_err);
+            report += &format!(
+                "{name}: right {r_err:.2}u {r_rot:.1}deg | left off-shaft {off:.2}u along {along:.1} | left reach {reach_l:.1}\n"
+            );
+            let mut bytes: Vec<u8> = Vec::new();
+            let t = world[tag];
+            for v in [t.translation.x, t.translation.y, t.translation.z, t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w] {
+                bytes.extend(v.to_le_bytes());
+            }
+            for v in skin(&sk, &world) {
+                bytes.extend(v.to_le_bytes());
+            }
+            std::fs::write(out.join(format!("{name}.bin")), bytes).unwrap();
+        }
+        report += &format!("WORST right {:.2}u {:.1}deg left {:.2}u\n", worst[0], worst[1], worst[2]);
+        std::fs::write(out.join("report.txt"), &report).unwrap();
+        println!("{report}");
+    }
 }
