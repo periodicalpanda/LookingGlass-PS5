@@ -1031,6 +1031,13 @@ impl Character {
             let held = self.actions.equipment().0 == 2
                 && self.actions.equipment().1 > 0.5
                 && self.actions.playing.is_some();
+            let play = self
+                .actions
+                .playing
+                .as_ref()
+                .filter(|p| held && !first_person && matches!(p.action, Action::Attack { .. }))
+                .map(|p| (p.time, p.duration, crate::weapon_rules::rule(2, p.alternate(), 0).release));
+            grip.slam(play, &self.skeleton, self.tags[0], &mut self.actions.pose);
             grip.apply(dt, held, &self.skeleton, self.tags[0], self.scale, &mut self.actions.pose);
         }
         self.foot_rig.apply(
@@ -3299,6 +3306,11 @@ impl Burn {
 /// The stock one-handed mallet is untouched.
 struct TwoHand {
     bones: [usize; 3],
+    right: [usize; 3],
+    left_shoulder: usize,
+    /// Weapon-tag rotation and its offset from the chest centre, captured from the last frame
+    /// outside a swing, so the procedural slam starts and ends on the carried pose.
+    carry: Option<(Quat, Vec3)>,
     origin: Vec3,
     direction: Vec3,
     range: (f32, f32),
@@ -3321,11 +3333,68 @@ impl TwoHand {
         let find = |n: &str| skeleton.bones.iter().position(|b| b.name == n);
         Some(Self {
             bones: [find("Bip01 L UpperArm")?, find("Bip01 L Forearm")?, find("Bip01 L Hand")?],
+            right: [find("Bip01 R UpperArm")?, find("Bip01 R Forearm")?, find("Bip01 R Hand")?],
+            left_shoulder: find("Bip01 L UpperArm")?,
+            carry: None,
             origin: vec3(n[0], n[1], n[2]),
             direction: direction.normalize(),
             range: (n[6].min(n[7]), n[6].max(n[7])),
             weight: 0.,
         })
+    }
+    /// Procedural overhead slam: Alice's authored swing clips are one-handed, so while one plays
+    /// the right arm is driven along wind-up, slam and recovery keys timed to the hit frame, and
+    /// the weapon tag follows. Outside swings this only records the carried pose.
+    fn slam(&mut self, play: Option<(f32, f32, f32)>, skeleton: &Skeleton, tag: usize, pose: &mut [Transform]) {
+        let [ru, rf, rh] = self.right;
+        let world = skeleton.global_pose(pose);
+        let centre = (world[ru].translation + world[self.left_shoulder].translation) * 0.5;
+        let Some((time, duration, hit)) = play else {
+            self.carry = Some((world[tag].rotation, world[tag].translation - centre));
+            return;
+        };
+        let Some((r0, offset)) = self.carry else { return };
+        let arm = (world[rf].translation - world[ru].translation).length()
+            + (world[rh].translation - world[rf].translation).length();
+        if arm <= 0. || !hit.is_finite() || hit <= 0.05 {
+            return;
+        }
+        let smooth = |x: f32| {
+            let x = x.clamp(0., 1.);
+            x * x * (3. - 2. * x)
+        };
+        let end = (duration - 0.04).max(hit + 0.25);
+        let rest = hit + 0.10;
+        let wind_at = (hit - 0.22).max(0.10);
+        let d0 = (r0 * self.direction).normalize();
+        let wind_d = vec3(-0.26, 0., 0.97).normalize();
+        let hit_d = vec3(0.82, 0., -0.57).normalize();
+        let carry_p = centre + offset;
+        let wind_p = centre + vec3(-0.05, 0., 0.95) * arm;
+        let hit_p = centre + vec3(0.85, 0., -0.45) * arm;
+        let turn = |a: Vec3, b: Vec3, u: f32| Quat::IDENTITY.slerp(Quat::from_rotation_arc(a, b), u) * a;
+        let (dir, at) = if time < wind_at {
+            let u = smooth(time / wind_at);
+            (turn(d0, wind_d, u), carry_p.lerp(wind_p, u))
+        } else if time < hit {
+            let x = (time - wind_at) / (hit - wind_at);
+            let u = x * x;
+            (turn(wind_d, hit_d, u), wind_p.lerp(hit_p, u))
+        } else if time < rest {
+            (hit_d, hit_p)
+        } else {
+            let u = smooth((time - rest) / (end - rest));
+            (turn(hit_d, d0, u), hit_p.lerp(carry_p, u))
+        };
+        let target = Quat::from_rotation_arc(d0, dir.normalize()) * r0;
+        let hand_rot = world[rh].rotation;
+        let local = hand_rot.inverse() * (world[tag].translation - world[rh].translation);
+        let rel = hand_rot.inverse() * world[tag].rotation;
+        let hand_target = (target * rel.inverse()).normalize();
+        reach_arm(skeleton, self.right, at - hand_target * local, 1., pose);
+        let world = skeleton.global_pose(pose);
+        let parent = skeleton.bones[rh].parent.map_or(Quat::IDENTITY, |p| world[p].rotation);
+        pose[rh].rotation = (parent.inverse() * hand_target).normalize();
     }
     fn apply(&mut self, dt: f32, held: bool, skeleton: &Skeleton, tag: usize, scale: f32, pose: &mut [Transform]) {
         let target = if held { 1. } else { 0. };
@@ -3333,43 +3402,50 @@ impl TwoHand {
         if self.weight <= 0. || scale <= 0. {
             return;
         }
-        let [upper, fore, hand] = self.bones;
         let world = skeleton.global_pose(pose);
-        let shoulder = world[upper].translation;
-        let elbow = world[fore].translation;
-        let wrist = world[hand].translation;
+        let shoulder = world[self.bones[0]].translation;
         // Grip the shaft where it passes nearest the left shoulder, inside the off-hand's range.
         let anchor = world[tag].point(self.origin / scale);
         let axis_dir = world[tag].rotation * self.direction;
         let along = ((shoulder - anchor).dot(axis_dir) * scale).clamp(self.range.0, self.range.1);
         let goal = anchor + axis_dir * (along / scale);
-        let (l1, l2) = ((elbow - shoulder).length(), (wrist - elbow).length());
-        let to_goal = goal - shoulder;
-        let d = to_goal.length().clamp((l1 - l2).abs() + 0.01, l1 + l2 - 0.01);
-        if l1 <= 0. || l2 <= 0. || to_goal.length() < 1e-4 {
-            return;
-        }
-        let axis = to_goal / to_goal.length();
-        // Keep the animation's elbow side as the pole.
-        let mut pole = (elbow - shoulder) - axis * (elbow - shoulder).dot(axis);
-        if pole.length() < 1e-4 {
-            pole = Vec3::NEG_Z;
-        }
-        let pole = pole.normalize();
-        let reach = (l1 * l1 - l2 * l2 + d * d) / (2. * d);
-        let up = (l1 * l1 - reach * reach).max(0.).sqrt();
-        let new_elbow = shoulder + axis * reach + pole * up;
-        let swing = |from: Vec3, to: Vec3| Quat::from_rotation_arc(from.normalize(), to.normalize());
-        let parent_rot = |i: usize, w: &[Transform]| skeleton.bones[i].parent.map_or(Quat::IDENTITY, |p| w[p].rotation);
-        let q1 = swing(elbow - shoulder, new_elbow - shoulder);
-        let g1 = (q1 * world[upper].rotation).normalize();
-        pose[upper].rotation = pose[upper].rotation.slerp((parent_rot(upper, &world).inverse() * g1).normalize(), self.weight);
-        let world = skeleton.global_pose(pose);
-        let elbow2 = world[fore].translation;
-        let wrist2 = world[hand].translation;
-        let tip = elbow2 + (goal - elbow2).normalize() * l2;
-        let q2 = swing(wrist2 - elbow2, tip - elbow2);
-        let g2 = (q2 * world[fore].rotation).normalize();
-        pose[fore].rotation = pose[fore].rotation.slerp((parent_rot(fore, &world).inverse() * g2).normalize(), self.weight);
+        reach_arm(skeleton, self.bones, goal, self.weight, pose);
     }
+}
+
+/// Two-bone reach of one arm: put the wrist at `goal`, keeping the animation's elbow side.
+fn reach_arm(skeleton: &Skeleton, bones: [usize; 3], goal: Vec3, weight: f32, pose: &mut [Transform]) {
+    let [upper, fore, hand] = bones;
+    let world = skeleton.global_pose(pose);
+    let shoulder = world[upper].translation;
+    let elbow = world[fore].translation;
+    let wrist = world[hand].translation;
+    let (l1, l2) = ((elbow - shoulder).length(), (wrist - elbow).length());
+    let to_goal = goal - shoulder;
+    let d = to_goal.length().clamp((l1 - l2).abs() + 0.01, l1 + l2 - 0.01);
+    if l1 <= 0. || l2 <= 0. || to_goal.length() < 1e-4 {
+        return;
+    }
+    let axis = to_goal / to_goal.length();
+    // Keep the animation's elbow side as the pole.
+    let mut pole = (elbow - shoulder) - axis * (elbow - shoulder).dot(axis);
+    if pole.length() < 1e-4 {
+        pole = Vec3::NEG_Z;
+    }
+    let pole = pole.normalize();
+    let reach = (l1 * l1 - l2 * l2 + d * d) / (2. * d);
+    let up = (l1 * l1 - reach * reach).max(0.).sqrt();
+    let new_elbow = shoulder + axis * reach + pole * up;
+    let swing = |from: Vec3, to: Vec3| Quat::from_rotation_arc(from.normalize(), to.normalize());
+    let parent_rot = |i: usize, w: &[Transform]| skeleton.bones[i].parent.map_or(Quat::IDENTITY, |p| w[p].rotation);
+    let q1 = swing(elbow - shoulder, new_elbow - shoulder);
+    let g1 = (q1 * world[upper].rotation).normalize();
+    pose[upper].rotation = pose[upper].rotation.slerp((parent_rot(upper, &world).inverse() * g1).normalize(), weight);
+    let world = skeleton.global_pose(pose);
+    let elbow2 = world[fore].translation;
+    let wrist2 = world[hand].translation;
+    let tip = elbow2 + (goal - elbow2).normalize() * l2;
+    let q2 = swing(wrist2 - elbow2, tip - elbow2);
+    let g2 = (q2 * world[fore].rotation).normalize();
+    pose[fore].rotation = pose[fore].rotation.slerp((parent_rot(fore, &world).inverse() * g2).normalize(), weight);
 }
