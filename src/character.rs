@@ -585,6 +585,8 @@ pub struct Character {
     /// models/alice.tik `burn` (torso, ON_FIRE in alice_torso.st STAND): arms flail
     /// while she burns; its entry plays burn_scream.wav.
     burn: Burn,
+    /// Optional off-hand grip for a long Mallet mesh (data pack marker twohand.txt).
+    two_hand: Option<TwoHand>,
     tags: [usize; 3],
     anchors: [Transform; 3],
     viewmodel: crate::viewmodel::ViewModel,
@@ -744,6 +746,7 @@ impl Character {
                 .position(|b| b.name == name)
                 .with_context(|| format!("Missing Alice attachment {name}"))
         };
+        let two_hand = TwoHand::load(assets, &skeleton);
         let tags = [
             tag("tag_weapon")?,
             tag("tag_ball_linked")?,
@@ -791,6 +794,7 @@ impl Character {
                 scream: false,
                 was_burning: false,
             },
+            two_hand,
             tags,
             anchors: [Transform {
                 rotation: Quat::IDENTITY,
@@ -1019,6 +1023,10 @@ impl Character {
             &mut self.actions.pose,
             &power_mask,
         );
+        if let Some(grip) = &mut self.two_hand {
+            let held = self.actions.equipment().0 == 2 && self.actions.equipment().1 > 0.5;
+            grip.apply(dt, held, &self.skeleton, self.tags[0], self.scale, &mut self.actions.pose);
+        }
         self.foot_rig.apply(
             &self.skeleton,
             &mut self.actions.pose,
@@ -3276,5 +3284,67 @@ impl Burn {
                 pose[i] = pose[i].blend(sample, self.weight);
             }
         }
+    }
+}
+
+/// Two-bone reach of the left arm onto a long Mallet shaft. Enabled only by a data pack that
+/// ships `models/weapons/mallet/twohand.txt` (first number: shaft offset of the left hand along
+/// the weapon's +X, in game units); the stock one-handed mallet is untouched.
+struct TwoHand {
+    bones: [usize; 3],
+    offset: f32,
+    weight: f32,
+}
+impl TwoHand {
+    fn load(assets: &mut Assets, skeleton: &Skeleton) -> Option<Self> {
+        let text = String::from_utf8(assets.read("models/weapons/mallet/twohand.txt").ok()?).ok()?;
+        let offset = text.split_whitespace().next()?.parse::<f32>().ok().filter(|v| v.is_finite() && v.abs() < 200.)?;
+        let find = |n: &str| skeleton.bones.iter().position(|b| b.name == n);
+        Some(Self {
+            bones: [find("Bip01 L UpperArm")?, find("Bip01 L Forearm")?, find("Bip01 L Hand")?],
+            offset,
+            weight: 0.,
+        })
+    }
+    fn apply(&mut self, dt: f32, held: bool, skeleton: &Skeleton, tag: usize, scale: f32, pose: &mut [Transform]) {
+        let target = if held { 1. } else { 0. };
+        self.weight += (target - self.weight).clamp(-dt / 0.15, dt / 0.15);
+        if self.weight <= 0. || scale <= 0. {
+            return;
+        }
+        let [upper, fore, hand] = self.bones;
+        let world = skeleton.global_pose(pose);
+        let shoulder = world[upper].translation;
+        let elbow = world[fore].translation;
+        let wrist = world[hand].translation;
+        let goal = world[tag].point(Vec3::X * self.offset / scale);
+        let (l1, l2) = ((elbow - shoulder).length(), (wrist - elbow).length());
+        let to_goal = goal - shoulder;
+        let d = to_goal.length().clamp((l1 - l2).abs() + 0.01, l1 + l2 - 0.01);
+        if l1 <= 0. || l2 <= 0. || to_goal.length() < 1e-4 {
+            return;
+        }
+        let axis = to_goal / to_goal.length();
+        // Keep the animation's elbow side as the pole.
+        let mut pole = (elbow - shoulder) - axis * (elbow - shoulder).dot(axis);
+        if pole.length() < 1e-4 {
+            pole = Vec3::NEG_Z;
+        }
+        let pole = pole.normalize();
+        let along = (l1 * l1 - l2 * l2 + d * d) / (2. * d);
+        let up = (l1 * l1 - along * along).max(0.).sqrt();
+        let new_elbow = shoulder + axis * along + pole * up;
+        let swing = |from: Vec3, to: Vec3| Quat::from_rotation_arc(from.normalize(), to.normalize());
+        let parent_rot = |i: usize, w: &[Transform]| skeleton.bones[i].parent.map_or(Quat::IDENTITY, |p| w[p].rotation);
+        let q1 = swing(elbow - shoulder, new_elbow - shoulder);
+        let g1 = (q1 * world[upper].rotation).normalize();
+        pose[upper].rotation = pose[upper].rotation.slerp((parent_rot(upper, &world).inverse() * g1).normalize(), self.weight);
+        let world = skeleton.global_pose(pose);
+        let elbow2 = world[fore].translation;
+        let wrist2 = world[hand].translation;
+        let reach = elbow2 + (goal - elbow2).normalize() * l2;
+        let q2 = swing(wrist2 - elbow2, reach - elbow2);
+        let g2 = (q2 * world[fore].rotation).normalize();
+        pose[fore].rotation = pose[fore].rotation.slerp((parent_rot(fore, &world).inverse() * g2).normalize(), self.weight);
     }
 }
