@@ -53,9 +53,13 @@ def main():
     ap.add_argument("--texture", required=True)
     ap.add_argument("--template", required=True, help="original models/weapons/mallet/notmoving.tan")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--length", type=float, default=64.0, help="whole-model length in game units")
-    ap.add_argument("--grip", type=float, default=0.125, help="right-hand grip as a fraction of the length from the butt")
-    ap.add_argument("--left-hand", type=float, default=18.0, help="off-hand position along the shaft (weapon +X, game units)")
+    ap.add_argument("--hand-r", default="-0.3,-0.4,3.1", help="right-hand grip point in weapon space (measured from the authored two-handed clips)")
+    ap.add_argument("--hand-l", default="14.5,3.7,-0.5", help="left-hand grip point in weapon space")
+    ap.add_argument("--butt", type=float, default=-17.0, help="shaft butt, in units behind the right hand along the shaft")
+    ap.add_argument("--head-base", type=float, default=28.0, help="where the head starts along the shaft, from the right hand")
+    ap.add_argument("--head-scale", type=float, default=38.5, help="game units per OBJ unit for the head")
+    ap.add_argument("--head-start", type=float, default=0.12, help="OBJ shaft coordinate where the head begins")
+    ap.add_argument("--left-hand-range", default="10,20", help="off-hand sliding range along the shaft during swings")
     ap.add_argument("--tex-size", type=int, default=512)
     ap.add_argument("--flip-v", type=int, default=1)
     ap.add_argument("--roll", type=float, default=0.0, help="degrees of roll about the shaft")
@@ -77,16 +81,32 @@ def main():
     if np.linalg.det(basis) < 0:
         basis[2, third] = -1
     local = pos @ basis.T
-    lo, hi = local[:, 0].min(), local[:, 0].max()
-    scale = args.length / (hi - lo)
-    local = (local - np.array([lo + (hi - lo) * args.grip, 0, 0])) * scale
-    # Centre the shaft on the hand axis.
-    shaft = local[local[:, 0] < local[:, 0].min() + 0.3 * args.length]
+    # Shaft coordinate: piecewise so the stick can be long while the head keeps its proportions.
+    k = local[:, 0]
+    stick_lo = k.min()
+    along = np.where(
+        k < args.head_start,
+        args.head_base - (args.head_start - k) / (args.head_start - stick_lo) * (args.head_base - args.butt),
+        args.head_base + (k - args.head_start) * args.head_scale,
+    )
+    local[:, 0] = along
+    local[:, 1:] *= args.head_scale
+    # Centre the shaft on its own axis.
+    shaft = local[local[:, 0] < args.head_base - 4]
     local[:, 1:] -= np.median(shaft[:, 1:], axis=0)
     if args.roll:
         r = np.radians(args.roll)
         c, sn = np.cos(r), np.sin(r)
         local[:, 1:] = local[:, 1:] @ np.array([[c, sn], [-sn, c]])
+    # Lay the shaft through both authored hand positions so the grip lands on it.
+    hr = np.array([float(x) for x in args.hand_r.split(",")])
+    hl = np.array([float(x) for x in args.hand_l.split(",")])
+    d = (hl - hr) / np.linalg.norm(hl - hr)
+    e2 = np.array([0.0, 0.0, 1.0]) - d * d[2]
+    e2 /= np.linalg.norm(e2)
+    e1 = np.cross(e2, d)
+    local = hr + np.outer(local[:, 0], d) + np.outer(local[:, 1], e1) + np.outer(local[:, 2], e2)
+    axis_origin, axis_dir = hr, d
 
     # Unique (position, uv) pairs become vertices.
     index, verts, tex, tris = {}, [], [], []
@@ -160,8 +180,8 @@ def main():
     with zipfile.ZipFile(args.out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("models/weapons/mallet/notmoving.tan", bytes(data))
         z.writestr("models/weapons/mallet/skin01.ftx", ftx)
-        z.writestr("models/weapons/mallet/twohand.txt", f"{args.left_hand}\n")
-    print(f"{args.out}: {nv} vertices, {nt} triangles, length {args.length} units, "
+        z.writestr("models/weapons/mallet/twohand.txt", " ".join(f"{v:.4f}" for v in [*axis_origin, *axis_dir]) + f" {args.left_hand_range.replace(',', ' ')}\n")
+    print(f"{args.out}: {nv} vertices, {nt} triangles, "
           f"extents x {vmin[0]:.1f}..{vmax[0]:.1f} y {vmin[1]:.1f}..{vmax[1]:.1f} z {vmin[2]:.1f}..{vmax[2]:.1f}")
 
 

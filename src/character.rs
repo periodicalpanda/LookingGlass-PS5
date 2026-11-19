@@ -3293,22 +3293,37 @@ impl Burn {
     }
 }
 
-/// Two-bone reach of the left arm onto a long Mallet shaft. Enabled only by a data pack that
-/// ships `models/weapons/mallet/twohand.txt` (first number: shaft offset of the left hand along
-/// the weapon's +X, in game units); the stock one-handed mallet is untouched.
+/// Two-bone reach of the left arm onto a long Mallet shaft during one-handed swing clips. Enabled
+/// only by a data pack that ships `models/weapons/mallet/twohand.txt`: shaft origin (x y z),
+/// shaft direction (x y z) in weapon space, then the off-hand's sliding range along the shaft.
+/// The stock one-handed mallet is untouched.
 struct TwoHand {
     bones: [usize; 3],
-    offset: f32,
+    origin: Vec3,
+    direction: Vec3,
+    range: (f32, f32),
     weight: f32,
 }
 impl TwoHand {
     fn load(assets: &mut Assets, skeleton: &Skeleton) -> Option<Self> {
         let text = String::from_utf8(assets.read("models/weapons/mallet/twohand.txt").ok()?).ok()?;
-        let offset = text.split_whitespace().next()?.parse::<f32>().ok().filter(|v| v.is_finite() && v.abs() < 200.)?;
+        let n = text
+            .split_whitespace()
+            .map(|v| v.parse::<f32>().ok().filter(|v| v.is_finite() && v.abs() < 500.))
+            .collect::<Option<Vec<_>>>()?;
+        if n.len() != 8 {
+            return None;
+        }
+        let direction = vec3(n[3], n[4], n[5]);
+        if direction.length() < 0.5 {
+            return None;
+        }
         let find = |n: &str| skeleton.bones.iter().position(|b| b.name == n);
         Some(Self {
             bones: [find("Bip01 L UpperArm")?, find("Bip01 L Forearm")?, find("Bip01 L Hand")?],
-            offset,
+            origin: vec3(n[0], n[1], n[2]),
+            direction: direction.normalize(),
+            range: (n[6].min(n[7]), n[6].max(n[7])),
             weight: 0.,
         })
     }
@@ -3323,12 +3338,11 @@ impl TwoHand {
         let shoulder = world[upper].translation;
         let elbow = world[fore].translation;
         let wrist = world[hand].translation;
-        // Grip the shaft where it passes nearest the left shoulder (within a band around the
-        // authored offset) so the hand meets the shaft instead of stopping short of it.
-        let axis_dir = world[tag].rotation * Vec3::X;
-        let along_shaft = (shoulder - world[tag].translation).dot(axis_dir) * scale;
-        let grip = along_shaft.clamp(self.offset - 6., self.offset + 6.);
-        let goal = world[tag].translation + axis_dir * (grip / scale);
+        // Grip the shaft where it passes nearest the left shoulder, inside the off-hand's range.
+        let anchor = world[tag].point(self.origin / scale);
+        let axis_dir = world[tag].rotation * self.direction;
+        let along = ((shoulder - anchor).dot(axis_dir) * scale).clamp(self.range.0, self.range.1);
+        let goal = anchor + axis_dir * (along / scale);
         let (l1, l2) = ((elbow - shoulder).length(), (wrist - elbow).length());
         let to_goal = goal - shoulder;
         let d = to_goal.length().clamp((l1 - l2).abs() + 0.01, l1 + l2 - 0.01);
@@ -3342,9 +3356,9 @@ impl TwoHand {
             pole = Vec3::NEG_Z;
         }
         let pole = pole.normalize();
-        let along = (l1 * l1 - l2 * l2 + d * d) / (2. * d);
-        let up = (l1 * l1 - along * along).max(0.).sqrt();
-        let new_elbow = shoulder + axis * along + pole * up;
+        let reach = (l1 * l1 - l2 * l2 + d * d) / (2. * d);
+        let up = (l1 * l1 - reach * reach).max(0.).sqrt();
+        let new_elbow = shoulder + axis * reach + pole * up;
         let swing = |from: Vec3, to: Vec3| Quat::from_rotation_arc(from.normalize(), to.normalize());
         let parent_rot = |i: usize, w: &[Transform]| skeleton.bones[i].parent.map_or(Quat::IDENTITY, |p| w[p].rotation);
         let q1 = swing(elbow - shoulder, new_elbow - shoulder);
@@ -3353,8 +3367,8 @@ impl TwoHand {
         let world = skeleton.global_pose(pose);
         let elbow2 = world[fore].translation;
         let wrist2 = world[hand].translation;
-        let reach = elbow2 + (goal - elbow2).normalize() * l2;
-        let q2 = swing(wrist2 - elbow2, reach - elbow2);
+        let tip = elbow2 + (goal - elbow2).normalize() * l2;
+        let q2 = swing(wrist2 - elbow2, tip - elbow2);
         let g2 = (q2 * world[fore].rotation).normalize();
         pose[fore].rotation = pose[fore].rotation.slerp((parent_rot(fore, &world).inverse() * g2).normalize(), self.weight);
     }
