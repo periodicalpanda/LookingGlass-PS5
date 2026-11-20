@@ -258,13 +258,13 @@ unsafe extern "C" fn crash_handler(signal: i32, _info: *mut u8, context: *mut u8
             *words.add(base + 3), *words.add(base + 4), *words.add(base + 5)
         ));
     }
-    let word = |offset: usize| *(context.add(16 + offset) as *const usize);
-    let (rip, rsp) = (word(160), word(184));
-    say(format_args!("crash: rip={rip:#x} rsp={rsp:#x}"));
+    // Observed on the console: eflags at word 30, rsp at word 31.
+    let rsp = *words.add(31);
+    say(format_args!("crash: rsp={rsp:#x}"));
     if (0x7_0000_0000..0x8_0000_0000).contains(&rsp) {
-        for index in 0..192usize {
+        for index in 0..512usize {
             let value = *((rsp + index * 8) as *const usize);
-            if (0x400000..0x2538000).contains(&value) {
+            if (0x400000..0x2548000).contains(&value) {
                 say(format_args!("crash: stack[{index}] = {value:#x}"));
             }
         }
