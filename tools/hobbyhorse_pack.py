@@ -63,7 +63,7 @@ def main():
     ap.add_argument("--left-hand-range", default="-16,-10", help="signed range along the shaft where the left palm grips (behind the right hand)")
     ap.add_argument("--tex-size", type=int, default=512)
     ap.add_argument("--flip-v", type=int, default=1)
-    ap.add_argument("--roll", type=float, default=0.0, help="degrees of roll about the shaft")
+    ap.add_argument("--roll", type=float, default=180.0, help="degrees of roll of the head about the shaft; 180 puts Alice's right hand over the shaft (knuckles up) in the carry, as in Madness Returns")
     ap.add_argument("--stick-axis", default="y", choices="xyz")
     ap.add_argument("--face-axis", default="-x", choices=["x","y","z","-x","-y","-z"], help="OBJ axis the muzzle points along")
     args = ap.parse_args()
@@ -181,7 +181,7 @@ def main():
     with zipfile.ZipFile(args.out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("models/weapons/mallet/notmoving.tan", bytes(data))
         z.writestr("models/weapons/mallet/skin01.ftx", ftx)
-        z.writestr("models/weapons/mallet/twohand.txt", " ".join(f"{v:.4f}" for v in [*axis_origin, *axis_dir]) + f" {args.left_hand_range.replace(',', ' ')}\n")
+        z.writestr("models/weapons/mallet/twohand.txt", " ".join(f"{v:.4f}" for v in [*axis_origin, *axis_dir]) + f" {args.left_hand_range.replace(',', ' ')} {args.roll:.1f}\n")
     print(f"{args.out}: {nv} vertices, {nt} triangles, "
           f"extents x {vmin[0]:.1f}..{vmax[0]:.1f} y {vmin[1]:.1f}..{vmax[1]:.1f} z {vmin[2]:.1f}..{vmax[2]:.1f}")
 
