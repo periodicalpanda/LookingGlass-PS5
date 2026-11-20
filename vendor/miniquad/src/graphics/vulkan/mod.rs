@@ -169,6 +169,7 @@ struct Inner {
     passes: ResourceManager<Pass>,
     render_passes: HashMap<RpVariant, vk::RenderPass>,
     samplers: HashMap<SamplerKey, vk::Sampler>,
+    max_anisotropy: f32,
     default_color: TextureId,
     default_depth: TextureId,
     default_fb: vk::Framebuffer,
@@ -235,8 +236,12 @@ impl Inner {
         let qci = [vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family).queue_priorities(&prio)];
         let mut dext: Vec<*const i8> = vec![khr::push_descriptor::NAME.as_ptr()];
         dext.extend(presenter.device_extensions().iter().map(|e| e.as_ptr()));
+        // Anisotropic filtering (VorpalFix "texture filtering"): use it when the GPU offers it.
+        let anisotropy_supported = instance.get_physical_device_features(pdev).sampler_anisotropy == vk::TRUE;
+        let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(anisotropy_supported);
+        let max_anisotropy = if anisotropy_supported { props.limits.max_sampler_anisotropy.min(16.0) } else { 1.0 };
         let device = vk_check(
-            instance.create_device(pdev, &vk::DeviceCreateInfo::default().queue_create_infos(&qci).enabled_extension_names(&dext), None),
+            instance.create_device(pdev, &vk::DeviceCreateInfo::default().queue_create_infos(&qci).enabled_extension_names(&dext).enabled_features(&features), None),
             "vkCreateDevice",
         );
         crate::native::ps5_trace(format_args!("vk: device created"));
@@ -290,6 +295,7 @@ impl Inner {
             passes: Default::default(),
             render_passes: HashMap::new(),
             samplers: HashMap::new(),
+            max_anisotropy,
             default_color: TextureId(TextureIdInner::Managed(0)),
             default_depth: TextureId(TextureIdInner::Managed(0)),
             default_fb: vk::Framebuffer::null(),
@@ -687,6 +693,10 @@ impl Inner {
             MipmapFilterMode::Nearest => (vk::SamplerMipmapMode::NEAREST, vk::LOD_CLAMP_NONE),
             MipmapFilterMode::Linear => (vk::SamplerMipmapMode::LINEAR, vk::LOD_CLAMP_NONE),
         };
+        // Only smooth, mip-mapped sampling benefits; UI and pixel-art samplers stay untouched.
+        let anisotropic = self.max_anisotropy > 1.0
+            && p.min_filter == FilterMode::Linear
+            && p.mipmap_filter == MipmapFilterMode::Linear;
         let s = vk_check(
             self.core.device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -696,7 +706,9 @@ impl Inner {
                     .address_mode_u(wrap)
                     .address_mode_v(wrap)
                     .address_mode_w(wrap)
-                    .max_lod(maxlod),
+                    .max_lod(maxlod)
+                    .anisotropy_enable(anisotropic)
+                    .max_anisotropy(self.max_anisotropy),
                 None,
             ),
             "sampler",

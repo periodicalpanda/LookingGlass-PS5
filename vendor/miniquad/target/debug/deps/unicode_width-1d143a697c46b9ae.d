@@ -1,0 +1,12 @@
+/home/claude/lookingglass-ps5/vendor/miniquad/target/debug/deps/unicode_width-1d143a697c46b9ae.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/lookup.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/lookup.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/props.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/props.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/tables.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/width_info.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/width_info.rs
+
+/home/claude/lookingglass-ps5/vendor/miniquad/target/debug/deps/libunicode_width-1d143a697c46b9ae.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/lookup.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/lookup.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/props.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/props.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/tables.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/width_info.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/width_info.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/lookup.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/lookup.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/props.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/props.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/tables.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/width_info.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-width-0.2.3/src/gen/width_info.rs:
