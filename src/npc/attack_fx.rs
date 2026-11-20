@@ -13,7 +13,7 @@ pub struct Art {
     gas: Option<Attached>,
 }
 thread_local! { static CACHE: std::cell::RefCell<std::rc::Weak<Art>> = Default::default(); }
-const MATERIALS: [&str; 3] = ["queenbeam1", "emap1", "textures/special/icechain"];
+const MATERIALS: [&str; 4] = ["queenbeam1", "emap1", "textures/special/icechain", "textures/special/swipe_lightning"];
 
 fn ribbon(from: Vec3, to: Vec3, camera: Vec3, width: f32, repeats: f32) -> Option<Mesh> {
     let axis = (to - from).try_normalize()?;
@@ -90,6 +90,46 @@ impl Art {
         mesh.texture = Some(self.layers[material].0.clone());
         // Original material stages own colour, blending and scrolling; no debug tint.
         render_fx::skin_effect(&mesh, age, 1.);
+    }
+    /// A weapon swipe trail, the original `swipeon <texture> <tag1> <tag2> <life>` / `swipeoff`
+    /// pair: a ribbon between two tags, one quad per sampled step while the swipe is on, each
+    /// fading over `life` seconds. `tags(t)` gives both tag positions at clip time `t`; the swipe
+    /// is on between `on` and `off`, and `now` is the clip time.
+    pub fn swipe(
+        &self,
+        material: &str,
+        tags: impl Fn(f32) -> (Vec3, Vec3),
+        now: f32,
+        on: f32,
+        off: f32,
+        life: f32,
+    ) {
+        let Some((texture, _)) = self.layers.get(material) else {
+            return;
+        };
+        if now < on || life <= 0. || !now.is_finite() {
+            return;
+        }
+        let step = 0.025;
+        let mut t = now.min(off);
+        while t - step >= on - 1e-4 && t > on {
+            let alpha = 1. - (now - t) / life;
+            if alpha <= 0. {
+                break;
+            }
+            let (a, b) = tags(t);
+            let (c, d) = tags((t - step).max(on));
+            let color = Color::new(1., 1., 1., alpha.clamp(0., 1.));
+            let mesh = Mesh {
+                vertices: [(a, vec2(0., 0.)), (b, vec2(1., 0.)), (c, vec2(1., 1.)), (d, vec2(0., 1.))]
+                    .map(|(p, uv)| Vertex::new(p.x, p.y, p.z, uv.x, uv.y, color))
+                    .to_vec(),
+                indices: vec![0, 1, 2, 0, 2, 3],
+                texture: Some(texture.clone()),
+            };
+            render_fx::skin_effect(&mesh, now, alpha.clamp(0., 1.));
+            t -= step;
+        }
     }
     /// Phantasm mana drain (PhantasmAttack mode 1): the original spawns `fx_metagas` at
     /// tag_head4, angled at the enemy; its tag_gas emitter streams `meta.spr` sprites.

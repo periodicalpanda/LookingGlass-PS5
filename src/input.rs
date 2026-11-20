@@ -245,7 +245,7 @@ fn gyro_look(index: u32) -> Vec2 {
         if let Some(p) = pad(index as usize) {
             let [pitch, yaw, _roll] = p.gyro;
             // Ignore sensor noise and the slow drift at rest.
-            let dead = |v: f32| if v.abs() < 0.04 { 0. } else { v - 0.04 * v.signum() };
+            let dead = |v: f32| if v.abs() < 0.15 { 0. } else { v - 0.15 * v.signum() };
             return vec2(-dead(yaw) / 2.5, dead(pitch) / 2.);
         }
     }

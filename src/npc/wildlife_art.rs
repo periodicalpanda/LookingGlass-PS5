@@ -57,6 +57,22 @@ impl Art {
                 draw_line_3d(from, end, Color::new(0.45, 0.75, 1., 0.7));
             }
         }
+        // attack_claw: `5 swipeon textures/special/swipe_lightning tag_claw01 tag_claw02 0.3`,
+        // `9 swipeoff` (c_jabberspawn.tik). The trail was never drawn.
+        if g.kind.jabber() && g.clip() == "attack_claw" && !g.frozen {
+            let frame = data.clips[g.clip()].frame_time;
+            let point = |t: f32, tag: &str| {
+                g.feet + Quat::from_rotation_z(g.yaw) * data.tag(g.clip(), t, tag).translation * g.scale
+            };
+            beams.swipe(
+                "textures/special/swipe_lightning",
+                |t| (point(t, "tag_claw01"), point(t, "tag_claw02")),
+                g.time,
+                5. * frame,
+                9. * frame,
+                0.3,
+            );
+        }
         if self.phase != Some(g.phase) || g.time < self.time {
             if let Some(effect) = &mut self.effect {
                 *effect = effect.fork();

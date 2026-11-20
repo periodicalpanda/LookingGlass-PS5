@@ -123,7 +123,7 @@ impl Default for Preferences {
             pad_sensitivity: 1.,
             pad_deadzone: 0.24,
             invert_pad: false,
-            gyro_aiming: cfg!(target_os = "freebsd"),
+            gyro_aiming: false,
         }
     }
 }

@@ -135,6 +135,16 @@ unsafe fn poll_pads() {
         }
     }
     drop(misses);
+    // Diagnostic for gyro bring-up: a line a few times a minute with the raw angular velocity.
+    static FRAME: Mutex<u32> = Mutex::new(0);
+    let mut frame = FRAME.lock().unwrap();
+    *frame = frame.wrapping_add(1);
+    if *frame % 600 == 0 {
+        if let Some(p) = pads[0] {
+            crate::native::ps5_trace(format_args!("pad: gyro {:.3} {:.3} {:.3}", p.gyro[0], p.gyro[1], p.gyro[2]));
+        }
+    }
+    drop(frame);
     *PADS.lock().unwrap() = pads;
 }
 
