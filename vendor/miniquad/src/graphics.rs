@@ -11,7 +11,10 @@ mod gl;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 #[cfg(feature = "vulkan")]
-pub use vulkan::VulkanContext;
+pub use vulkan::{set_anisotropy, VulkanContext};
+/// No-op on backends without anisotropic filtering support.
+#[cfg(not(feature = "vulkan"))]
+pub fn set_anisotropy(_level: u32) {}
 
 pub use gl::raw_gl;
 

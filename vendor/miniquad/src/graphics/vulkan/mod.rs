@@ -115,6 +115,12 @@ struct Pass {
     h: u32,
 }
 
+static ANISOTROPY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+/// Maximum anisotropic filtering for smooth, mip-mapped textures (1 = off); clamped to the GPU's limit.
+pub fn set_anisotropy(level: u32) {
+    ANISOTROPY.store(level.clamp(1, 16), std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct RpKey {
     colors: [vk::Format; 4],
@@ -236,10 +242,9 @@ impl Inner {
         let qci = [vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family).queue_priorities(&prio)];
         let mut dext: Vec<*const i8> = vec![khr::push_descriptor::NAME.as_ptr()];
         dext.extend(presenter.device_extensions().iter().map(|e| e.as_ptr()));
-        // Anisotropic filtering (VorpalFix "texture filtering"): use it when the GPU offers it.
-        // Off until it is confirmed not to hide the options-menu mirror render on the console.
-        const ANISOTROPIC_FILTERING: bool = false;
-        let anisotropy_supported = ANISOTROPIC_FILTERING && instance.get_physical_device_features(pdev).sampler_anisotropy == vk::TRUE;
+        // Anisotropic filtering (VorpalFix "texture filtering"): the feature is enabled whenever the
+        // GPU offers it; the level in use is chosen at run time with `set_anisotropy`.
+        let anisotropy_supported = instance.get_physical_device_features(pdev).sampler_anisotropy == vk::TRUE;
         let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(anisotropy_supported);
         let max_anisotropy = if anisotropy_supported { props.limits.max_sampler_anisotropy.min(16.0) } else { 1.0 };
         let device = vk_check(
@@ -694,7 +699,8 @@ impl Inner {
     }
 
     unsafe fn sampler(&mut self, p: &TextureParams) -> vk::Sampler {
-        let key = SamplerKey(p.min_filter as u8, p.mag_filter as u8, p.mipmap_filter as u8, p.wrap as u8, 0);
+        let aniso = (ANISOTROPY.load(std::sync::atomic::Ordering::Relaxed) as f32).min(self.max_anisotropy).max(1.0);
+        let key = SamplerKey(p.min_filter as u8, p.mag_filter as u8, p.mipmap_filter as u8, p.wrap as u8, aniso as u32);
         if let Some(s) = self.samplers.get(&key) { return *s; }
         let f = |m: FilterMode| if m == FilterMode::Linear { vk::Filter::LINEAR } else { vk::Filter::NEAREST };
         let wrap = match p.wrap { TextureWrap::Repeat => vk::SamplerAddressMode::REPEAT, TextureWrap::Mirror => vk::SamplerAddressMode::MIRRORED_REPEAT, TextureWrap::Clamp => vk::SamplerAddressMode::CLAMP_TO_EDGE };
@@ -704,7 +710,7 @@ impl Inner {
             MipmapFilterMode::Linear => (vk::SamplerMipmapMode::LINEAR, vk::LOD_CLAMP_NONE),
         };
         // Only smooth, mip-mapped sampling benefits; UI and pixel-art samplers stay untouched.
-        let anisotropic = self.max_anisotropy > 1.0
+        let anisotropic = aniso > 1.0
             && p.min_filter == FilterMode::Linear
             && p.mipmap_filter == MipmapFilterMode::Linear;
         let s = vk_check(
@@ -718,7 +724,7 @@ impl Inner {
                     .address_mode_w(wrap)
                     .max_lod(maxlod)
                     .anisotropy_enable(anisotropic)
-                    .max_anisotropy(self.max_anisotropy),
+                    .max_anisotropy(aniso),
                 None,
             ),
             "sampler",

@@ -1076,6 +1076,16 @@ impl Menu {
                         text: "Mute".into(), art: String::new(), hover: String::new(),
                         click: Click::Row(2), lettering: None, setting: None, hover_sound: String::new(), click_sound: String::new() });
                 }
+                if page == Page::Video {
+                    // Texture filtering is a Rust feature without an original widget.
+                    let below = buttons.iter().map(|b| b.rect.bottom()).fold(0., f32::max);
+                    let left = buttons.iter().map(|b| b.rect.x).fold(f32::MAX, f32::min);
+                    let level = self.draft.anisotropy;
+                    buttons.push(Button { rect: Rect::new(left, below + 14., 260., 26.),
+                        text: format!("Texture Filtering: {}", if level == 1 { "Standard".to_owned() } else { format!("{level}x") }),
+                        art: String::new(), hover: String::new(),
+                        click: Click::Row(2), lettering: None, setting: None, hover_sound: String::new(), click_sound: String::new() });
+                }
                 let group = match page {
                     Page::Video => "group_video", Page::Audio => "group_audio", _ => "group_game",
                 };
@@ -1163,6 +1173,12 @@ impl Menu {
                 .rem_euclid(SIZES.len() as i32) as usize
             }
             (Page::Video, 1) => self.draft.fullscreen = !self.draft.fullscreen,
+            (Page::Video, 2) => {
+                let levels = [1u32, 2, 4, 8, 16];
+                let at = levels.iter().position(|l| *l == self.draft.anisotropy).unwrap_or(0) as i32;
+                let next = (at + if delta < 0. { -1 } else { 1 }).rem_euclid(levels.len() as i32) as usize;
+                self.draft.anisotropy = levels[next];
+            }
             (Page::Audio, 0) => {
                 self.draft_audio.music = (self.draft_audio.music + delta * 0.05).clamp(0., 1.)
             }
@@ -2039,6 +2055,7 @@ impl Menu {
                                 match self.draft.save().and_then(|_| self.draft_audio.save()) {
                                     Ok(()) => {
                                         *prefs = self.draft.clone();
+                                        macroquad::miniquad::graphics::set_anisotropy(prefs.anisotropy);
                                         audio.settings = self.draft_audio;
                                         if display_changed {
                                             prefs.display();

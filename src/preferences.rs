@@ -107,6 +107,8 @@ pub struct Preferences {
     pub invert_pad: bool,
     /// DualSense motion aiming (the controller's gyro adds to right-stick look).
     pub gyro_aiming: bool,
+    /// Anisotropic texture filtering level: 1 (off), 2, 4, 8 or 16. Vulkan (PS5) only.
+    pub anisotropy: u32,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -124,12 +126,14 @@ impl Default for Preferences {
             pad_deadzone: 0.24,
             invert_pad: false,
             gyro_aiming: false,
+            anisotropy: 1,
         }
     }
 }
 impl Preferences {
     fn validate(&self) -> Result<()> {
         ensure!(self.resolution < SIZES.len(), "Invalid display size");
+        ensure!([1, 2, 4, 8, 16].contains(&self.anisotropy), "Invalid texture filtering level");
         ensure!(
             self.sensitivity.is_finite() && (0.2..=3.).contains(&self.sensitivity),
             "Invalid sensitivity"

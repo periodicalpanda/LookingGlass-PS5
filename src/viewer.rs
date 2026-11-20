@@ -545,6 +545,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     let mut escape_menu = crate::menu::Menu::load(&mut assets).context("Loading original menus")?;
     let mut preferences = crate::preferences::Preferences::load();
+    macroquad::miniquad::graphics::set_anisotropy(preferences.anisotropy);
     let mut input = crate::input::Input::default();
     let mut weapon_buttons = crate::weapon_rules::Buttons::default();
     weapon_buttons.block();
