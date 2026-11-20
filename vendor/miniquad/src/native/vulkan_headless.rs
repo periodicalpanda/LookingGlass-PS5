@@ -26,16 +26,16 @@ where
     F: 'static + FnOnce() -> Box<dyn EventHandler>,
     P: FnMut(&mut dyn EventHandler),
 {
-    eprintln!("run: display data");
+    crate::native::ps5_trace(format_args!("run: display data"));
     let (tx, rx) = std::sync::mpsc::channel();
     crate::set_display(NativeDisplayData {
         high_dpi: conf.high_dpi,
         dpi_scale: 1.0,
         ..NativeDisplayData::new(size.0, size.1, tx, Box::new(NoClipboard))
     });
-    eprintln!("run: creating the event handler");
+    crate::native::ps5_trace(format_args!("run: creating the event handler"));
     let mut handler = f();
-    eprintln!("run: event handler ready");
+    crate::native::ps5_trace(format_args!("run: event handler ready"));
     loop {
         if crate::native_display().lock().unwrap().quit_ordered { break; }
         while let Ok(_request) = rx.try_recv() {}

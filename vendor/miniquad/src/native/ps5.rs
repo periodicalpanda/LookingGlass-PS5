@@ -145,7 +145,7 @@ impl Presenter for DisplayPresenter {
         let sc = self.swapchain_fn.as_ref().unwrap();
         let (index, _) = match unsafe { sc.acquire_next_image(self.swapchain, u64::MAX, self.acquired, vk::Fence::null()) } {
             Ok(r) => r,
-            Err(e) => { eprintln!("ps5: acquire failed: {e:?}"); self.index = None; return (vec![], vec![]); }
+            Err(e) => { crate::native::ps5_trace(format_args!("ps5: acquire failed: {e:?}")); self.index = None; return (vec![], vec![]); }
         };
         self.index = Some(index);
         let dst = self.images[index as usize];
@@ -178,18 +178,18 @@ impl Presenter for DisplayPresenter {
         let sc = self.swapchain_fn.as_ref().unwrap();
         let (s, w, i) = ([self.swapchain], [self.rendered], [index]);
         if let Err(e) = unsafe { sc.queue_present(core.queue, &vk::PresentInfoKHR::default().swapchains(&s).wait_semaphores(&w).image_indices(&i)) } {
-            eprintln!("ps5: present failed: {e:?}");
+            crate::native::ps5_trace(format_args!("ps5: present failed: {e:?}"));
         }
     }
 }
 
 impl DisplayPresenter {
     unsafe fn create(&mut self, core: &Core) -> Result<(), vk::Result> {
-        eprintln!("ps5: display setup");
+        crate::native::ps5_trace(format_args!("ps5: display setup"));
         let disp = khr::display::Instance::new(&core.entry, &core.instance);
         let pdev = core.pdev;
         let displays = disp.get_physical_device_display_properties(pdev)?;
-        eprintln!("ps5: {} display(s)", displays.len());
+        crate::native::ps5_trace(format_args!("ps5: {} display(s)", displays.len()));
         let display = displays.first().ok_or(vk::Result::ERROR_INITIALIZATION_FAILED)?.display;
         // The console's mode: the one with the highest refresh at the largest size.
         let modes = disp.get_display_mode_properties(pdev, display)?;
@@ -197,7 +197,7 @@ impl DisplayPresenter {
             .iter()
             .max_by_key(|m| (m.parameters.visible_region.width * m.parameters.visible_region.height, m.parameters.refresh_rate))
             .ok_or(vk::Result::ERROR_INITIALIZATION_FAILED)?;
-        eprintln!("ps5: {} display mode(s)", modes.len());
+        crate::native::ps5_trace(format_args!("ps5: {} display mode(s)", modes.len()));
         let planes = disp.get_physical_device_display_plane_properties(pdev)?;
         let mut plane = None;
         for i in 0..planes.len() as u32 {
@@ -219,7 +219,7 @@ impl DisplayPresenter {
                 .image_extent(extent),
             None,
         )?;
-        eprintln!("ps5: display surface created");
+        crate::native::ps5_trace(format_args!("ps5: display surface created"));
         let surface_fn = khr::surface::Instance::new(&core.entry, &core.instance);
         let scaps = surface_fn.get_physical_device_surface_capabilities(pdev, surface)?;
         let formats = surface_fn.get_physical_device_surface_formats(pdev, surface)?;
@@ -230,7 +230,7 @@ impl DisplayPresenter {
             .copied()
             .ok_or(vk::Result::ERROR_FORMAT_NOT_SUPPORTED)?;
         let count = (scaps.min_image_count + 1).min(if scaps.max_image_count == 0 { u32::MAX } else { scaps.max_image_count });
-        eprintln!("ps5: surface queried, {} format(s)", formats.len());
+        crate::native::ps5_trace(format_args!("ps5: surface queried, {} format(s)", formats.len()));
         let swapchain_fn = khr::swapchain::Device::new(&core.instance, &core.device);
         let swapchain = swapchain_fn.create_swapchain(
             &vk::SwapchainCreateInfoKHR::default()
@@ -248,12 +248,12 @@ impl DisplayPresenter {
                 .clipped(true),
             None,
         )?;
-        eprintln!("ps5: swapchain created");
+        crate::native::ps5_trace(format_args!("ps5: swapchain created"));
         self.images = swapchain_fn.get_swapchain_images(swapchain)?;
         self.acquired = core.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?;
         self.rendered = core.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?;
-        eprintln!("ps5: display {}x{} @ {} mHz, {} swapchain images {:?}, rendering at {}x{}",
-            extent.width, extent.height, mode.parameters.refresh_rate, self.images.len(), format.format, self.render.0, self.render.1);
+        crate::native::ps5_trace(format_args!("ps5: display {}x{} @ {} mHz, {} swapchain images {:?}, rendering at {}x{}",
+            extent.width, extent.height, mode.parameters.refresh_rate, self.images.len(), format.format, self.render.0, self.render.1));
         self.extent = extent;
         self.swapchain = swapchain;
         self.surface_fn = Some(surface_fn);
@@ -268,9 +268,9 @@ where
 {
     unsafe {
         platform_init(b"Looking Glass\0".as_ptr() as *const c_char);
-        if !pad_open() { eprintln!("ps5: no controller yet"); }
+        if !pad_open() { crate::native::ps5_trace(format_args!("ps5: no controller yet")); }
     }
-    eprintln!("ps5: pad ready, installing the presenter");
+    crate::native::ps5_trace(format_args!("ps5: pad ready, installing the presenter"));
     vulkan::set_presenter(Box::new(DisplayPresenter {
         render: RENDER_SIZE,
         surface_fn: None,
@@ -283,7 +283,7 @@ where
         index: None,
     }));
     let size = (RENDER_SIZE.0 as i32, RENDER_SIZE.1 as i32);
-    eprintln!("ps5: running the application at {}x{}", size.0, size.1);
+    crate::native::ps5_trace(format_args!("ps5: running the application at {}x{}", size.0, size.1));
     crate::native::vulkan_headless::run_with(conf, size, f, |_handler: &mut dyn EventHandler| unsafe { poll_pads() });
     let _ = std::ptr::null::<c_void>();
 }

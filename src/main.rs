@@ -231,6 +231,16 @@ unsafe extern "C" fn crash_handler(signal: i32, _info: *mut u8, context: *mut u8
         let _ = line.write_fmt(args);
         line.bytes[line.len] = b'\n';
         unsafe { write(2, line.bytes.as_ptr(), line.len + 1) };
+        // stderr is lost on the console: also append to the start-up log.
+        if let Ok(text) = core::str::from_utf8(&line.bytes[..line.len]) {
+            use std::io::Write;
+            for path in ["/data/homebrew/PPSA99641/private/startup.log", "/data/lg-startup.log"] {
+                if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+                    let _ = writeln!(file, "{text}");
+                    break;
+                }
+            }
+        }
     }
     extern "C" {
         fn sceKernelUsleep(microseconds: u32) -> i32;

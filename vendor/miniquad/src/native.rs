@@ -127,3 +127,18 @@ pub mod gl;
 pub use wasm::webgl as gl;
 
 pub mod query_stab;
+
+
+/// Rust's standard error does not reach the PS5 klog, so progress markers go to the title's
+/// start-up log file instead (see the application's `startup_log`).
+#[allow(dead_code)]
+pub fn ps5_trace(args: core::fmt::Arguments) {
+    use std::io::Write;
+    eprintln!("{args}");
+    for path in ["/data/homebrew/PPSA99641/private/startup.log", "/data/lg-startup.log"] {
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{args}");
+            return;
+        }
+    }
+}

@@ -208,24 +208,24 @@ impl Inner {
             let (w, h) = crate::window::screen_size();
             Box::new(Headless(w as u32, h as u32))
         });
-        eprintln!("vk: start");
+        crate::native::ps5_trace(format_args!("vk: start"));
         let entry = match presenter.entry() {
             Some(e) => e,
             None => vk_check(ash::Entry::load().map_err(|_| vk::Result::ERROR_INITIALIZATION_FAILED), "load Vulkan"),
         };
-        eprintln!("vk: entry ready");
+        crate::native::ps5_trace(format_args!("vk: entry ready"));
         let app = vk::ApplicationInfo::default().api_version(vk::make_api_version(0, 1, 1, 0));
         let iext: Vec<*const i8> = presenter.instance_extensions().iter().map(|e| e.as_ptr()).collect();
         let instance = vk_check(
             entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&iext), None),
             "vkCreateInstance",
         );
-        eprintln!("vk: instance created");
+        crate::native::ps5_trace(format_args!("vk: instance created"));
         let pdevs = vk_check(instance.enumerate_physical_devices(), "enumerate devices");
-        eprintln!("vk: {} physical device(s)", pdevs.len());
+        crate::native::ps5_trace(format_args!("vk: {} physical device(s)", pdevs.len()));
         let pdev = *pdevs.first().expect("no Vulkan device");
         let props = instance.get_physical_device_properties(pdev);
-        eprintln!("vk: device {}", CStr::from_ptr(props.device_name.as_ptr()).to_string_lossy());
+        crate::native::ps5_trace(format_args!("vk: device {}", CStr::from_ptr(props.device_name.as_ptr()).to_string_lossy()));
         let queue_family = instance
             .get_physical_device_queue_family_properties(pdev)
             .iter()
@@ -239,7 +239,7 @@ impl Inner {
             instance.create_device(pdev, &vk::DeviceCreateInfo::default().queue_create_infos(&qci).enabled_extension_names(&dext), None),
             "vkCreateDevice",
         );
-        eprintln!("vk: device created");
+        crate::native::ps5_trace(format_args!("vk: device created"));
         let queue = device.get_device_queue(queue_family, 0);
         let core = Core { entry, instance, pdev, device, queue, queue_family };
         let push = khr::push_descriptor::Device::new(&core.instance, &core.device);
@@ -256,7 +256,7 @@ impl Inner {
             "command buffers",
         );
         let fence = vk_check(core.device.create_fence(&vk::FenceCreateInfo::default(), None), "fence");
-        eprintln!("vk: command buffers ready");
+        crate::native::ps5_trace(format_args!("vk: command buffers ready"));
 
         let pick = |cands: &[vk::Format]| {
             *cands
@@ -316,12 +316,12 @@ impl Inner {
             },
             core,
         };
-        eprintln!("vk: backend state built");
+        crate::native::ps5_trace(format_args!("vk: backend state built"));
         let (rb, rm) = inner.make_buffer(RING_SIZE as usize, vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST);
         inner.ring = Ring { buf: rb, mem: rm, off: 0 };
-        eprintln!("vk: ring buffer ready");
+        crate::native::ps5_trace(format_args!("vk: ring buffer ready"));
         inner.presenter.init(&inner.core);
-        eprintln!("vk: presenter ready");
+        crate::native::ps5_trace(format_args!("vk: presenter ready"));
         inner.begin_cmd();
         let (w, h) = inner.presenter.size();
         inner.create_default_target(w, h);
