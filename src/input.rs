@@ -236,6 +236,22 @@ fn read_pad(index: u32) -> Option<RawPad> {
         None
     }
 }
+/// DualSense motion as extra look input, in the units of a stick deflection (the camera turns
+/// `look.x * 2.5` and pitches `look.y * 2.0` rad/s), so 1:1 hand-to-view turning at sensitivity 1.
+fn gyro_look(index: u32) -> Vec2 {
+    #[cfg(target_os = "freebsd")]
+    {
+        use macroquad::miniquad::native::ps5::pad;
+        if let Some(p) = pad(index as usize) {
+            let [pitch, yaw, _roll] = p.gyro;
+            // Ignore sensor noise and the slow drift at rest.
+            let dead = |v: f32| if v.abs() < 0.04 { 0. } else { v - 0.04 * v.signum() };
+            return vec2(-dead(yaw) / 2.5, dead(pitch) / 2.);
+        }
+    }
+    let _ = index;
+    Vec2::ZERO
+}
 fn stick(x: i16, y: i16, deadzone: f32) -> Vec2 {
     let v = vec2(x as f32 / 32767., y as f32 / 32767.);
     let length = v.length();
@@ -443,9 +459,13 @@ impl Input {
         self.pad.move_axis
     }
     pub fn look(&self, prefs: &Preferences) -> Vec2 {
-        self.pad.look_axis
-            * vec2(1., if prefs.invert_pad { -1. } else { 1. })
-            * prefs.pad_sensitivity
+        let invert = vec2(1., if prefs.invert_pad { -1. } else { 1. });
+        let stick = self.pad.look_axis * invert * prefs.pad_sensitivity;
+        if prefs.gyro_aiming && self.pad.connected {
+            stick + gyro_look(0) * invert * prefs.pad_sensitivity
+        } else {
+            stick
+        }
     }
     pub fn label(&self, prefs: &Preferences, original: &str) -> String {
         crate::preferences::BINDINGS

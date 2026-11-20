@@ -105,6 +105,8 @@ pub struct Preferences {
     pub pad_sensitivity: f32,
     pub pad_deadzone: f32,
     pub invert_pad: bool,
+    /// DualSense motion aiming (the controller's gyro adds to right-stick look).
+    pub gyro_aiming: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -121,6 +123,7 @@ impl Default for Preferences {
             pad_sensitivity: 1.,
             pad_deadzone: 0.24,
             invert_pad: false,
+            gyro_aiming: cfg!(target_os = "freebsd"),
         }
     }
 }

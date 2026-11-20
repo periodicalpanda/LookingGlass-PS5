@@ -79,6 +79,7 @@ struct pad_reading {
    uint8_t l2, r2;                           /* 0..255 */
    bool connected;
    uint64_t timestamp_us;
+   float gyro[3];                            /* angular velocity in rad/s: pitch, yaw, roll */
 };
 
 /* Every reading the last pad_poll took, oldest first (the console keeps up to

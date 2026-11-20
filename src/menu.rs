@@ -996,7 +996,7 @@ impl Menu {
                     });
                 }
                 if self.controls_pad && self.controls_page == BINDINGS.len().div_ceil(8) {
-                    for (i, label) in ["Look Sensitivity", "Invert Look", "Stick Deadzone"]
+                    for (i, label) in ["Look Sensitivity", "Invert Look", "Stick Deadzone", "Gyro Aiming"]
                         .into_iter()
                         .enumerate()
                     {
@@ -1167,6 +1167,9 @@ impl Menu {
             (Page::Controls, row) if row == BINDINGS.len() + 1 => {
                 self.draft.invert_pad = !self.draft.invert_pad
             }
+            (Page::Controls, row) if row == BINDINGS.len() + 3 => {
+                self.draft.gyro_aiming = !self.draft.gyro_aiming
+            }
             (Page::Controls, _) => {
                 self.draft.pad_deadzone = (self.draft.pad_deadzone + delta * 0.02).clamp(0.1, 0.4)
             }
@@ -1181,6 +1184,7 @@ impl Menu {
             (Page::Game, 3) => Some(self.draft.always_run),
             (Page::Game, 4) => Some(self.draft.subtitles),
             (Page::Controls, row) if row == BINDINGS.len() + 1 => Some(self.draft.invert_pad),
+            (Page::Controls, row) if row == BINDINGS.len() + 3 => Some(self.draft.gyro_aiming),
             _ => None,
         }
     }
@@ -1879,6 +1883,7 @@ impl Menu {
                                     self.draft.pad_sensitivity = defaults.pad_sensitivity;
                                     self.draft.pad_deadzone = defaults.pad_deadzone;
                                     self.draft.invert_pad = false;
+                                    self.draft.gyro_aiming = defaults.gyro_aiming;
                                 } else {
                                     self.draft.bindings = defaults.bindings;
                                 }

@@ -45,6 +45,7 @@ struct CPadReading {
     r2: u8,
     connected: bool,
     timestamp_us: u64,
+    gyro: [f32; 3],
 }
 
 extern "C" {
@@ -90,6 +91,8 @@ pub struct PadState {
     pub right_y: u8,
     pub l2: u8,
     pub r2: u8,
+    /// Angular velocity in rad/s: pitch, yaw, roll.
+    pub gyro: [f32; 3],
 }
 
 static PADS: Mutex<[Option<PadState>; 4]> = Mutex::new([None; 4]);
@@ -100,19 +103,38 @@ pub fn pad(player: usize) -> Option<PadState> {
 }
 
 unsafe fn poll_pads() {
+    // A frame can pass with no new sample (scePadRead returns 0) or one connection blip. Treating
+    // that as "pad gone" made the engine show "controller disconnected" and freeze the sticks until
+    // they were re-centred, while the triggers kept working. Keep the last state through short gaps.
+    const GRACE_FRAMES: u32 = 45;
+    static MISSES: Mutex<[u32; 4]> = Mutex::new([0; 4]);
     let mut p0 = CPad::default();
     pad_poll(&mut p0);
+    let previous = *PADS.lock().unwrap();
+    let mut misses = MISSES.lock().unwrap();
     let mut pads = [None; 4];
     for (player, slot) in pads.iter_mut().enumerate() {
         let mut p = CPad::default();
-        if !pad_player(player as i32, &mut p) { continue; }
-        let mut readings: *const CPadReading = std::ptr::null();
-        let n = pad_player_readings(player as i32, &mut readings);
-        if n <= 0 || readings.is_null() { continue; }
-        let r = *readings.add(n as usize - 1);
-        if !r.connected || r.buttons & button::INTERCEPTED != 0 { continue; }
-        *slot = Some(PadState { buttons: r.buttons, left_x: r.left_x, left_y: r.left_y, right_x: r.right_x, right_y: r.right_y, l2: r.l2, r2: r.r2 });
+        let mut fresh = None;
+        if pad_player(player as i32, &mut p) {
+            let mut readings: *const CPadReading = std::ptr::null();
+            let n = pad_player_readings(player as i32, &mut readings);
+            if n > 0 && !readings.is_null() {
+                let r = *readings.add(n as usize - 1);
+                if r.connected && r.buttons & button::INTERCEPTED == 0 {
+                    fresh = Some(PadState { buttons: r.buttons, left_x: r.left_x, left_y: r.left_y, right_x: r.right_x, right_y: r.right_y, l2: r.l2, r2: r.r2, gyro: r.gyro });
+                }
+            }
+        }
+        match fresh {
+            Some(state) => { misses[player] = 0; *slot = Some(state); }
+            None => {
+                misses[player] = misses[player].saturating_add(1);
+                if misses[player] <= GRACE_FRAMES { *slot = previous[player]; }
+            }
+        }
     }
+    drop(misses);
     *PADS.lock().unwrap() = pads;
 }
 
