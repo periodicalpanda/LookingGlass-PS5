@@ -109,6 +109,8 @@ pub struct Preferences {
     pub gyro_aiming: bool,
     /// Anisotropic texture filtering level: 1 (off), 2, 4, 8 or 16. Vulkan (PS5) only.
     pub anisotropy: u32,
+    /// Multisample anti-aliasing: 1 (off), 2, 4 or 8. Vulkan (PS5) only.
+    pub msaa: u32,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -127,6 +129,7 @@ impl Default for Preferences {
             invert_pad: false,
             gyro_aiming: false,
             anisotropy: 1,
+            msaa: 1,
         }
     }
 }
@@ -134,6 +137,7 @@ impl Preferences {
     fn validate(&self) -> Result<()> {
         ensure!(self.resolution < SIZES.len(), "Invalid display size");
         ensure!([1, 2, 4, 8, 16].contains(&self.anisotropy), "Invalid texture filtering level");
+        ensure!([1, 2, 4, 8].contains(&self.msaa), "Invalid anti-aliasing level");
         ensure!(
             self.sensitivity.is_finite() && (0.2..=3.).contains(&self.sensitivity),
             "Invalid sensitivity"

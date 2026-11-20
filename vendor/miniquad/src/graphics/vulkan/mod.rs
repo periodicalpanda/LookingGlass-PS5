@@ -115,6 +115,13 @@ struct Pass {
     h: u32,
 }
 
+static MSAA: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+/// Multisample anti-aliasing for the main 3D view (1 = off, otherwise 2, 4 or 8, clamped to what the GPU
+/// supports). Takes effect at the end of the current frame.
+pub fn set_msaa(level: u32) {
+    MSAA.store(level.clamp(1, 8), std::sync::atomic::Ordering::Relaxed);
+}
+
 static ANISOTROPY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 /// Maximum anisotropic filtering for smooth, mip-mapped textures (1 = off); clamped to the GPU's limit.
 pub fn set_anisotropy(level: u32) {
@@ -126,6 +133,9 @@ struct RpKey {
     colors: [vk::Format; 4],
     ncolors: u8,
     depth: vk::Format,
+    /// MSAA sample count of every attachment (1 = off). Multisampled passes resolve colour 0
+    /// into one extra single-sample attachment placed last.
+    samples: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -180,6 +190,10 @@ struct Inner {
     default_depth: TextureId,
     default_fb: vk::Framebuffer,
     default_key: RpKey,
+    /// Active MSAA sample count and the largest the GPU offers for colour + depth.
+    msaa: u32,
+    max_msaa: u32,
+    ms_images: Option<(Texture, Texture)>,
     depth_format: vk::Format,
     default_depth_format: vk::Format,
     active: Option<Active>,
@@ -306,7 +320,13 @@ impl Inner {
             default_color: TextureId(TextureIdInner::Managed(0)),
             default_depth: TextureId(TextureIdInner::Managed(0)),
             default_fb: vk::Framebuffer::null(),
-            default_key: RpKey { colors: [vk::Format::UNDEFINED; 4], ncolors: 0, depth: vk::Format::UNDEFINED },
+            msaa: 1,
+            max_msaa: {
+                let c = props.limits.framebuffer_color_sample_counts & props.limits.framebuffer_depth_sample_counts & props.limits.framebuffer_stencil_sample_counts;
+                [8u32, 4, 2].iter().copied().find(|n| c.contains(vk::SampleCountFlags::from_raw(*n))).unwrap_or(1)
+            },
+            ms_images: None,
+            default_key: RpKey { colors: [vk::Format::UNDEFINED; 4], ncolors: 0, depth: vk::Format::UNDEFINED, samples: 1 },
             depth_format,
             default_depth_format,
             active: None,
@@ -482,15 +502,80 @@ impl Inner {
             TextureParams { width: w, height: h, format: TextureFormat::Depth, ..Default::default() },
             Some(self.default_depth_format),
         );
-        let key = RpKey { colors: [vk::Format::R8G8B8A8_UNORM, vk::Format::UNDEFINED, vk::Format::UNDEFINED, vk::Format::UNDEFINED], ncolors: 1, depth: self.default_depth_format };
-        let views = [self.tex(c).view, self.tex(dpt).view];
+        self.default_color = c;
+        self.default_depth = dpt;
+        self.build_default_fb();
+    }
+
+    /// Multisampled colour or depth image for the default pass, already in its attachment layout.
+    unsafe fn make_ms_image(&mut self, w: u32, h: u32, format: vk::Format, depth: bool, samples: u32) -> Texture {
+        let d = self.core.device.clone();
+        let usage = if depth { vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT } else { vk::ImageUsageFlags::COLOR_ATTACHMENT };
+        let image = vk_check(
+            d.create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::from_raw(samples))
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(usage)
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                None,
+            ),
+            "vkCreateImage (msaa)",
+        );
+        let mem = self.alloc.alloc(&d, d.get_image_memory_requirements(image), false);
+        vk_check(d.bind_image_memory(image, mem.memory, mem.offset), "bind image (msaa)");
+        let view = vk_check(
+            d.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(vk::ImageSubresourceRange { aspect_mask: aspect_of(format), base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }),
+                None,
+            ),
+            "image view (msaa)",
+        );
+        let t = Texture { image, view, mem, format, params: TextureParams { width: w, height: h, ..Default::default() }, levels: 1, depth, used_frame: 0 };
+        let cmd = self.upload_cmd();
+        let to = if depth { vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL } else { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL };
+        self.layout_barrier(cmd, &t, vk::ImageLayout::UNDEFINED, to);
+        t
+    }
+
+    /// (Re)build the default framebuffer for the current MSAA setting, retiring the previous one.
+    unsafe fn build_default_fb(&mut self) {
+        let (w, h) = { let t = self.tex(self.default_color); (t.params.width, t.params.height) };
+        let old_fb = std::mem::replace(&mut self.default_fb, vk::Framebuffer::null());
+        if old_fb != vk::Framebuffer::null() {
+            self.trash.push(Box::new(move |d, _| d.destroy_framebuffer(old_fb, None)));
+        }
+        if let Some((c, dp)) = self.ms_images.take() {
+            self.trash_texture(c);
+            self.trash_texture(dp);
+        }
+        let samples = MSAA.load(std::sync::atomic::Ordering::Relaxed).min(self.max_msaa).max(1);
+        let samples = if samples.is_power_of_two() { samples } else { 1 };
+        self.msaa = samples;
+        let key = RpKey { colors: [vk::Format::R8G8B8A8_UNORM, vk::Format::UNDEFINED, vk::Format::UNDEFINED, vk::Format::UNDEFINED], ncolors: 1, depth: self.default_depth_format, samples: samples as u8 };
         let rp = self.render_pass(RpVariant { key, clear_color: false, clear_depth: false, clear_stencil: false });
+        let views: Vec<vk::ImageView> = if samples > 1 {
+            let c = self.make_ms_image(w, h, vk::Format::R8G8B8A8_UNORM, false, samples);
+            let dp = self.make_ms_image(w, h, self.default_depth_format, true, samples);
+            let v = vec![c.view, dp.view, self.tex(self.default_color).view];
+            self.ms_images = Some((c, dp));
+            v
+        } else {
+            vec![self.tex(self.default_color).view, self.tex(self.default_depth).view]
+        };
         self.default_fb = vk_check(
             self.core.device.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(rp).attachments(&views).width(w).height(h).layers(1), None),
             "default framebuffer",
         );
-        self.default_color = c;
-        self.default_depth = dpt;
         self.default_key = key;
     }
 
@@ -502,13 +587,13 @@ impl Inner {
             atts.push(
                 vk::AttachmentDescription::default()
                     .format(v.key.colors[i])
-                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .samples(vk::SampleCountFlags::from_raw(v.key.samples as u32))
                     .load_op(if v.clear_color { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
                     .store_op(vk::AttachmentStoreOp::STORE)
                     .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                     .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                    .initial_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                    .initial_layout(if v.key.samples > 1 { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL } else { vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL })
+                    .final_layout(if v.key.samples > 1 { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL } else { vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }),
             );
             refs.push(vk::AttachmentReference { attachment: i as u32, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL });
         }
@@ -518,7 +603,7 @@ impl Inner {
             atts.push(
                 vk::AttachmentDescription::default()
                     .format(v.key.depth)
-                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .samples(vk::SampleCountFlags::from_raw(v.key.samples as u32))
                     .load_op(if v.clear_depth { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
                     .store_op(vk::AttachmentStoreOp::STORE)
                     .stencil_load_op(if v.clear_stencil { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
@@ -529,6 +614,22 @@ impl Inner {
         }
         let mut sub = vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&refs);
         if has_depth { sub = sub.depth_stencil_attachment(&dref); }
+        let rrefs = [vk::AttachmentReference { attachment: v.key.ncolors as u32 + has_depth as u32, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL }];
+        if v.key.samples > 1 {
+            // Resolve colour 0 into the single-sample image that is sampled, copied and presented.
+            atts.push(
+                vk::AttachmentDescription::default()
+                    .format(v.key.colors[0])
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            );
+            sub = sub.resolve_attachments(&rrefs);
+        }
         let all = vk::PipelineStageFlags::ALL_COMMANDS;
         let gfx = vk::PipelineStageFlags::ALL_GRAPHICS; // the subpass side may only name graphics stages
         let rw = vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
@@ -829,7 +930,7 @@ impl Inner {
         if let Some((factor, units)) = p.depth_write_offset {
             rs = rs.depth_bias_enable(true).depth_bias_slope_factor(factor).depth_bias_constant_factor(units);
         }
-        let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::from_raw(key.samples as u32));
         let st = |f: &StencilFaceState| vk::StencilOpState {
             fail_op: stencil_op(f.fail_op),
             pass_op: stencil_op(f.pass_op),
@@ -1222,7 +1323,7 @@ impl RenderingBackend for VulkanContext {
         // Every image here is single-sampled, so there is nothing to resolve: render straight into
         // the resolve targets (the textures macroquad samples from) instead of leaving them empty.
         let color_img = resolve_img.filter(|r| r.len() == color_img.len()).unwrap_or(color_img);
-        let mut key = RpKey { colors: [vk::Format::UNDEFINED; 4], ncolors: color_img.len() as u8, depth: vk::Format::UNDEFINED };
+        let mut key = RpKey { colors: [vk::Format::UNDEFINED; 4], ncolors: color_img.len() as u8, depth: vk::Format::UNDEFINED, samples: 1 };
         let mut views = vec![];
         let (mut w, mut h) = (u32::MAX, u32::MAX);
         for (i, c) in color_img.iter().enumerate() {
@@ -1413,6 +1514,9 @@ impl RenderingBackend for VulkanContext {
         unsafe {
             s.end_pass_inner();
             s.submit(true);
+            let want = MSAA.load(std::sync::atomic::Ordering::Relaxed).min(s.max_msaa).max(1);
+            let want = if want.is_power_of_two() { want } else { 1 };
+            if want != s.msaa { s.build_default_fb(); }
         }
         s.frame += 1;
         s.pipeline = None;

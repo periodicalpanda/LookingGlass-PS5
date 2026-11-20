@@ -1085,6 +1085,11 @@ impl Menu {
                         text: format!("Texture Filtering: {}", if level == 1 { "Standard".to_owned() } else { format!("{level}x") }),
                         art: String::new(), hover: String::new(),
                         click: Click::Row(2), lettering: None, setting: None, hover_sound: String::new(), click_sound: String::new() });
+                    let msaa = self.draft.msaa;
+                    buttons.push(Button { rect: Rect::new(left, below + 14. + 30., 260., 26.),
+                        text: format!("Anti-Aliasing: {}", if msaa == 1 { "Off".to_owned() } else { format!("{msaa}x MSAA") }),
+                        art: String::new(), hover: String::new(),
+                        click: Click::Row(3), lettering: None, setting: None, hover_sound: String::new(), click_sound: String::new() });
                 }
                 let group = match page {
                     Page::Video => "group_video", Page::Audio => "group_audio", _ => "group_game",
@@ -1178,6 +1183,12 @@ impl Menu {
                 let at = levels.iter().position(|l| *l == self.draft.anisotropy).unwrap_or(0) as i32;
                 let next = (at + if delta < 0. { -1 } else { 1 }).rem_euclid(levels.len() as i32) as usize;
                 self.draft.anisotropy = levels[next];
+            }
+            (Page::Video, 3) => {
+                let levels = [1u32, 2, 4, 8];
+                let at = levels.iter().position(|l| *l == self.draft.msaa).unwrap_or(0) as i32;
+                let next = (at + if delta < 0. { -1 } else { 1 }).rem_euclid(levels.len() as i32) as usize;
+                self.draft.msaa = levels[next];
             }
             (Page::Audio, 0) => {
                 self.draft_audio.music = (self.draft_audio.music + delta * 0.05).clamp(0., 1.)
@@ -2056,6 +2067,7 @@ impl Menu {
                                     Ok(()) => {
                                         *prefs = self.draft.clone();
                                         macroquad::miniquad::graphics::set_anisotropy(prefs.anisotropy);
+                                        macroquad::miniquad::graphics::set_msaa(prefs.msaa);
                                         audio.settings = self.draft_audio;
                                         if display_changed {
                                             prefs.display();
