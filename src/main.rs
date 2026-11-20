@@ -201,7 +201,81 @@ fn title_path(relative: &str) -> PathBuf {
     }
 }
 
+/// Prints where a fatal signal hit (klog): the registers that matter and every stack word that
+/// points into the executable, which is a usable backtrace for `llvm-symbolizer` (the title
+/// loads at 0x400000, the ELF in ps5/build/link/llvm-pie.elf is linked at 0). The console's
+/// own crash report leaves its backtrace empty.
+#[allow(dead_code)]
+unsafe extern "C" fn crash_handler(signal: i32, _info: *mut u8, context: *mut u8) {
+    extern "C" {
+        fn write(fd: i32, buf: *const u8, len: usize) -> isize;
+    }
+    struct Line {
+        bytes: [u8; 160],
+        len: usize,
+    }
+    impl core::fmt::Write for Line {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            for &byte in text.as_bytes() {
+                if self.len < self.bytes.len() - 1 {
+                    self.bytes[self.len] = byte;
+                    self.len += 1;
+                }
+            }
+            Ok(())
+        }
+    }
+    fn say(args: core::fmt::Arguments) {
+        use core::fmt::Write;
+        let mut line = Line { bytes: [0; 160], len: 0 };
+        let _ = line.write_fmt(args);
+        line.bytes[line.len] = b'\n';
+        unsafe { write(2, line.bytes.as_ptr(), line.len + 1) };
+    }
+    // FreeBSD amd64 ucontext_t: a 16-byte signal mask, then mcontext_t (rip at +160, rsp at +184,
+    // the fault address mc_addr at +136, rax at +56, rdi at +8).
+    let word = |offset: usize| *(context.add(16 + offset) as *const usize);
+    let (rip, rsp) = (word(160), word(184));
+    say(format_args!("crash: signal {signal} rip={rip:#x} rsp={rsp:#x} fault={:#x} rax={:#x} rdi={:#x}", word(136), word(56), word(8)));
+    for index in 0..192usize {
+        let value = *((rsp + index * 8) as *const usize);
+        if (0x400000..0x2538000).contains(&value) {
+            say(format_args!("crash: stack[{index}] = {value:#x}"));
+        }
+    }
+}
+
+#[allow(dead_code)]
+unsafe fn install_crash_handler() -> usize {
+    // FreeBSD struct sigaction: handler, flags, 128-bit signal mask.
+    #[repr(C)]
+    struct SigAction {
+        handler: usize,
+        flags: i32,
+        mask: [u32; 4],
+    }
+    extern "C" {
+        fn sigaction(signal: i32, action: *const SigAction, old: *mut SigAction) -> i32;
+    }
+    const SA_RESETHAND: i32 = 0x4;
+    const SA_SIGINFO: i32 = 0x40;
+    let action = SigAction { handler: crash_handler as usize, flags: SA_SIGINFO | SA_RESETHAND, mask: [0; 4] };
+    let mut installed = 0;
+    for signal in [4, 8, 10, 11] {
+        // SIGILL, SIGFPE, SIGBUS, SIGSEGV
+        if sigaction(signal, &action, core::ptr::null_mut()) == 0 {
+            installed += 1;
+        }
+    }
+    installed
+}
+
 fn main() {
+    #[cfg(target_os = "freebsd")]
+    {
+        let installed = unsafe { install_crash_handler() };
+        startup_log(&format!("Looking Glass: crash handler installed for {installed} of 4 signals"));
+    }
     #[cfg(target_os = "freebsd")]
     if std::env::var_os("LOOKING_GLASS_SETTINGS_DIR").is_none() {
         std::env::set_var("LOOKING_GLASS_SETTINGS_DIR", title_path("private"));
