@@ -230,7 +230,6 @@ impl Actions {
         self.playing.as_ref().is_some_and(|p| {
             matches!(p.action, Action::Attack { .. })
                 && (self.selected == 8
-                    || hobby_combo(self.selected, p.alternate(), self.free_alternate)
                     || (self.selected == 7
                         && p.alternate()
                         && p.stage != crate::weapon_rules::Stage::End))
@@ -3108,7 +3107,8 @@ mod tests {
             a.finish_frame();
         }
         assert_eq!(count, HOBBY_COMBO_HITS.len());
-        assert!(locked);
+        // Alice can move while the combo plays.
+        assert!(!locked);
         assert!(a.playing.is_none());
         assert!((s.will() - before).abs() < 0.001);
     }

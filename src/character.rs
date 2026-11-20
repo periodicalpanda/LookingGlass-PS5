@@ -3326,8 +3326,9 @@ impl Burn {
 struct TwoHand {
     left: [usize; 3],
     right: [usize; 3],
-    left_palm: usize,
-    left_knuckles: [usize; 2],
+    /// Left palm centre and knuckle line (index to middle) in the left hand's frame.
+    left_palm_local: Vec3,
+    left_knuckles_local: Vec3,
     spine: usize,
     root: usize,
     head: usize,
@@ -3338,11 +3339,13 @@ struct TwoHand {
     muzzle: Vec3,
     range: (f32, f32),
     weight: f32,
-    /// Natural wrist bends (right, left) from the carry stance, the reference for every swing:
-    /// the Mallet's own swing clips wring the wrist, which the hobby horse must not copy.
-    rest_wrists: Option<[Quat; 2]>,
-    /// Last frame's (roll, elbow swing) per arm, so the solve stays continuous.
-    last: [Option<(f32, f32)>; 2],
+    /// Natural (elbow, wrist) bends per arm (right, left), from the two-handed carry stance: the
+    /// reference for every pose, so neither the swing clips nor idle fidgets wring the arms.
+    natural: Option<[(Quat, Quat); 2]>,
+    /// Last frame's choices per arm, so the solve stays continuous.
+    last: [Option<ArmChoice>; 2],
+    /// Last frame's local turn of each arm bone (right, then left), to cap how fast they turn.
+    last_arms: Option<[Quat; 6]>,
 }
 
 /// One keyed weapon placement in the chest frame: where the right palm holds the shaft, the shaft
@@ -3585,7 +3588,15 @@ fn hh_spin(time: f32, duration: f32, hit: f32) -> HhBeat {
 impl TwoHand {
     fn load(assets: &mut Assets, skeleton: &Skeleton) -> Option<Self> {
         let text = String::from_utf8(assets.read("models/weapons/mallet/twohand.txt").ok()?).ok()?;
-        Self::parse(&text, skeleton)
+        let mut hand = Self::parse(&text, skeleton)?;
+        if let Some(stance) = assets
+            .read("models/alice/ready_bw.ska")
+            .ok()
+            .and_then(|d| Animation::parse(&d, skeleton.bones.len()).ok())
+        {
+            hand.set_natural(skeleton, &stance.sample(0., true));
+        }
+        Some(hand)
     }
     fn parse(text: &str, skeleton: &Skeleton) -> Option<Self> {
         let n = text
@@ -3610,8 +3621,8 @@ impl TwoHand {
         Some(Self {
             left: [find("Bip01 L UpperArm")?, find("Bip01 L Forearm")?, find("Bip01 L Hand")?],
             right: [find("Bip01 R UpperArm")?, find("Bip01 R Forearm")?, find("Bip01 R Hand")?],
-            left_palm: find("tag_ball_linked")?,
-            left_knuckles: [find("Bip01 L Finger1")?, find("Bip01 L Finger2")?],
+            left_palm_local: Vec3::ZERO,
+            left_knuckles_local: Vec3::X,
             spine: find("Bip01 Spine1")?,
             root: find("Bip01")?,
             head: find("Bip01 Head")?,
@@ -3625,9 +3636,25 @@ impl TwoHand {
             muzzle,
             range: (n[6].min(n[7]), n[6].max(n[7])),
             weight: 0.,
-            rest_wrists: None,
+            natural: None,
             last: [None; 2],
+            last_arms: None,
         })
+    }
+    /// Take the natural elbow and wrist bends from a carry-stance pose.
+    fn set_natural(&mut self, skeleton: &Skeleton, stance: &[Transform]) {
+        self.natural = Some([self.right, self.left].map(|[_, f, h]| (stance[f].rotation, stance[h].rotation)));
+        let find = |n: &str| skeleton.bones.iter().position(|b| b.name == n);
+        let world = skeleton.global_pose(stance);
+        let lh = self.left[2];
+        let local = |p: Vec3| world[lh].rotation.inverse() * (p - world[lh].translation);
+        if let (Some(palm), Some(f1), Some(f2)) =
+            (find("tag_ball_linked"), find("Bip01 L Finger1"), find("Bip01 L Finger2"))
+        {
+            self.left_palm_local = local(world[palm].translation);
+            self.left_knuckles_local =
+                (local(world[f1].translation) - local(world[f2].translation)).try_normalize().unwrap_or(Vec3::X);
+        }
     }
     /// Chest frame of the current pose: origin between the shoulders, +Z straight up, +Y along
     /// the shoulders (left) kept level, +X forward. Staying upright keeps the keys meaningful
@@ -3693,20 +3720,16 @@ impl TwoHand {
         self.weight += (target - self.weight).clamp(-dt.max(0.) / 0.15, dt.max(0.) / 0.15);
         if self.weight <= 0. {
             self.last = [None; 2];
+            self.last_arms = None;
             return;
         }
         let w = self.weight;
         // The animation's own elbow and wrist bends: arms are re-aimed, but these keep their
         // shape so wrists and elbows never twist beyond what the animation does.
-        if play.is_none() {
-            self.rest_wrists = Some([self.right, self.left].map(|[_, _, h]| pose[h].rotation));
+        if self.natural.is_none() {
+            self.set_natural(skeleton, pose);
         }
-        let rest = self.rest_wrists;
-        let natural = [self.right, self.left]
-            .map(|[_, f, _]| pose[f].rotation)
-            .into_iter()
-            .zip(rest.unwrap_or([self.right[2], self.left[2]].map(|h| pose[h].rotation)))
-            .collect::<Vec<_>>();
+        let natural = self.natural.unwrap_or_default();
         let parent_rot = |i: usize, world: &[Transform]| skeleton.bones[i].parent.map_or(Quat::IDENTITY, |p| world[p].rotation);
         // Crouch, leap and lean with the swing. Feet stay planted while the hips drop; in the air
         // they rise with the body and the knees tuck.
@@ -3746,103 +3769,136 @@ impl TwoHand {
         // The horse may roll about its own shaft (a little in the carry, freely mid-swing) to keep
         // the wrist natural; the turn is barely visible on a spinning horse but the wrist is.
         let shaft = goal.rotation * self.direction;
-        let spread = if play.is_some() { 2.1 } else { 0.35 };
-        let roll_at = |i: usize| {
-            let roll = (i as f32 / 12. - 0.5) * 2. * spread;
+        let spread = if play.is_some() { 0.7 } else { 0.35 };
+        let roll_at = |roll: f32, _: f32| {
             let tag_rot = (Quat::from_axis_angle(shaft, roll) * goal.rotation).normalize();
             let tag_at = goal.translation + goal.rotation * self.origin - tag_rot * self.origin;
             let hand = (tag_rot * rel.rotation.inverse()).normalize();
-            (tag_at - hand * rel.translation, hand, roll)
+            (tag_at - hand * rel.translation, hand, 0.25 * roll.abs())
         };
         let head = world[self.head].translation;
         let chest = world[self.chest].translation;
         let avoid = [(head + (head - chest).normalize_or_zero() * 3., 6.5), (chest, 5.5)];
-        let prev = self.last[0];
         self.last[0] = Some(solve_arm_grip(
             skeleton,
             self.right,
             roll_at,
-            13,
+            (-spread, spread),
+            (0., 0.),
             natural[0],
             frame * HH_RIGHT_POLE,
             1.,
-            prev,
+            self.last[0],
+            dt,
             &avoid,
             pose,
         ));
-        // Left palm on the shaft, nearest the left shoulder inside the grip range.
+        // Left palm on the shaft below the right hand. Its turn is held relative to the horse
+        // (knuckles along the shaft), never taken from the playing animation, so it cannot
+        // wander as the animation fidgets; the solve picks the angle round the shaft and the
+        // place along it.
         let world = skeleton.global_pose(pose);
         let start = world[tag].point(self.origin);
         let axis = world[tag].rotation * self.direction;
-        let along = (world[self.left[0]].translation - start).dot(axis).clamp(self.range.0, self.range.1);
-        let grip_along = along;
         let [_, _, lh] = self.left;
-        let knuckles = world[self.left_knuckles[0]].translation - world[self.left_knuckles[1]].translation;
-        let turn = Quat::from_rotation_arc(knuckles.try_normalize().unwrap_or(axis), axis);
-        let left_rot = (turn * world[lh].rotation).normalize();
-        let palm = world[lh].rotation.inverse() * (world[self.left_palm].translation - world[lh].translation);
-        let _ = w;
+        let base = (world[tag].rotation * Quat::from_rotation_arc(self.left_knuckles_local, self.direction)).normalize();
+        let palm = self.left_palm_local;
         let hold = w * (1. - body.free.clamp(0., 1.));
         // Let go and take hold again along an arc around the shoulder, not through the body.
         let shoulder = world[self.left[0]].translation;
         let balance = self.chest_frame(&world).point(HH_BALANCE) - shoulder;
         let k = (hold / w.max(1e-3)).clamp(0., 1.);
         let current = world[lh].translation;
-        // The palm can close round the shaft at any angle and anywhere in a stretch below the
-        // right hand; try a ring of angles at a few places along it.
-        let (lo, hi) = (self.range.0 - 6., self.range.1 + 4.);
-        let grip_at = |i: usize| {
-            let (place, ring) = (i / 12, i % 12);
-            let along = lo + (hi - lo) * place as f32 / 4.;
-            let at = start + axis * along;
-            let roll = Quat::from_axis_angle(axis, ring as f32 * std::f32::consts::TAU / 12.);
-            let hand = (roll * left_rot).normalize();
-            let held_at = at - hand * palm - shoulder;
+        let usual = (shoulder - start).dot(axis).clamp(self.range.0, self.range.1);
+        let grip_at = |angle: f32, along: f32| {
+            let hand = (Quat::from_axis_angle(axis, angle) * base).normalize();
+            let held_at = start + axis * along - hand * palm - shoulder;
             let arc = Quat::IDENTITY.slerp(Quat::from_rotation_arc(balance.normalize(), held_at.normalize()), k)
                 * balance.normalize()
                 * (balance.length().min(18.) + (held_at.length() - balance.length().min(18.)) * k);
-            let angle = ring as f32 * std::f32::consts::TAU / 12.;
-            let angle = if angle > std::f32::consts::PI { angle - std::f32::consts::TAU } else { angle };
-            // Prefer the usual grip spot; the roll term also carries the slide along the shaft.
-            (current.lerp(shoulder + arc, w), hand, angle + (along - grip_along) * 0.05)
+            (current.lerp(shoulder + arc, w), hand, 0.05 * (along - usual).abs())
         };
-        let prev = self.last[1];
         self.last[1] = Some(solve_arm_grip(
             skeleton,
             self.left,
             grip_at,
-            60,
+            (-std::f32::consts::PI, std::f32::consts::PI),
+            (self.range.0 - 6., self.range.1 + 4.),
             natural[1],
             frame * HH_LEFT_POLE,
             hold,
-            prev,
+            self.last[1],
+            dt,
             &avoid,
             pose,
         ));
+        // No arm bone turns faster than an arm can (about 1800 degrees a second): a safeguard
+        // that keeps every solve continuous on screen (real swings stay well under it).
+        let bones = [self.right[0], self.right[1], self.right[2], self.left[0], self.left[1], self.left[2]];
+        if let (Some(last), true) = (self.last_arms, dt > 0.) {
+            let solved = skeleton.global_pose(pose);
+            let most = 31.4 * dt;
+            let mut capped = [false; 2];
+            for (i, (b, prev)) in bones.into_iter().zip(last).enumerate() {
+                let turn = prev.angle_between(pose[b].rotation);
+                if turn > most {
+                    pose[b].rotation = prev.slerp(pose[b].rotation, most / turn).normalize();
+                    capped[i / 3] = true;
+                }
+            }
+            // A held hand still lands on its grip: reach it again on the capped elbow's side.
+            for (arm, was) in [self.right, self.left].into_iter().zip(capped) {
+                if !was {
+                    continue;
+                }
+                let [u, f, h] = arm;
+                let world = skeleton.global_pose(pose);
+                let side = world[f].translation - world[u].translation;
+                reach_arm(skeleton, arm, solved[h].translation, Some(side), 1., pose);
+                let world = skeleton.global_pose(pose);
+                let parent = skeleton.bones[h].parent.map_or(Quat::IDENTITY, |p| world[p].rotation);
+                pose[h].rotation = (parent.inverse() * solved[h].rotation).normalize();
+            }
+        }
+        self.last_arms = Some(bones.map(|b| pose[b].rotation));
     }
 }
 
-/// Put an arm's wrist on one of several grips and turn the hand to it. `grip(i)` for
-/// `i < grips` gives a wrist position, hand turn (world) and a preference cost, and the one the
-/// arm reaches most naturally is used. The elbow stays a true hinge (its natural bend from the
-/// animation, `natural.0`, only opened or closed, never twisted); the elbow's swing about the
-/// shoulder-wrist line keeps the wrist close to its natural bend (`natural.1`), prefers `pole`,
-/// avoids passing through `avoid` spheres and stays near last frame's choice `prev`. What twist
-/// remains is shared between wrist and forearm. `hold` below 1 relaxes the hand
-/// towards its natural bend (letting go).
+/// An arm solve's free choices: a grip parameter pair (`a` an angle, `b` a distance; their meaning
+/// is the caller's) and the elbow's swing about the shoulder-wrist line.
+#[derive(Clone, Copy, Debug, Default)]
+struct ArmChoice {
+    a: f32,
+    b: f32,
+    swivel: f32,
+    /// Where that put the elbow, from the shoulder in the parent bone's frame.
+    elbow: Vec3,
+}
+fn wrap_pi(a: f32) -> f32 {
+    (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+/// Put an arm's wrist on a grip and turn the hand to it. `grip(a, b)` gives a wrist position,
+/// hand turn (world) and a preference cost for grip parameters `a` (an angle, wrapped, searched
+/// over `a_range`) and `b` (searched over `b_range`). The elbow stays a true hinge (the natural
+/// elbow `natural.0` only opened or closed, never twisted); the choice keeps the wrist near its
+/// natural bend `natural.1`, the elbow hanging towards `pole` and below the shoulder, the arm
+/// out of the `avoid` spheres, and moves only part way (`follow`) from last frame's `prev` so
+/// the arm never jumps. What twist remains is shared between wrist and forearm.
 #[allow(clippy::too_many_arguments)]
 fn solve_arm_grip(
     skeleton: &Skeleton,
     bones: [usize; 3],
-    grip: impl Fn(usize) -> (Vec3, Quat, f32),
-    grips: usize,
+    grip: impl Fn(f32, f32) -> (Vec3, Quat, f32),
+    a_range: (f32, f32),
+    b_range: (f32, f32),
     natural: (Quat, Quat),
     pole: Vec3,
     hold: f32,
-    prev: Option<(f32, f32)>,
+    prev: Option<ArmChoice>,
+    dt: f32,
     avoid: &[(Vec3, f32)],
     pose: &mut [Transform],
-) -> (f32, f32) {
+) -> ArmChoice {
     let [upper, fore, h] = bones;
     let (elbow0, wrist0) = natural;
     let world = skeleton.global_pose(pose);
@@ -3852,39 +3908,43 @@ fn solve_arm_grip(
     let along_fore = pose[h].translation.try_normalize().unwrap_or(Vec3::X);
     let (l1, l2) = (pose[fore].translation.length(), pose[h].translation.length());
     if l1 <= 0. || l2 <= 0. {
-        return (0., 0.);
+        return prev.unwrap_or_default();
     }
     // Hinge axis of the natural elbow, in the upper arm's frame.
     let hinge = along_upper.cross(elbow0 * along_fore).try_normalize().unwrap_or(Vec3::Z);
     let hinge_frame = Quat::from_mat3(&macroquad::math::Mat3::from_cols(along_upper, hinge.cross(along_upper), hinge));
-    // Arm pose for a wrist target and an elbow swing about the shoulder-wrist line.
+    let elbow_local = |elbow: Vec3| parent.inverse() * (elbow - shoulder);
+    let pole = pole.try_normalize().unwrap_or(Vec3::NEG_Z);
+    let backup = pole.any_orthonormal_vector().cross(pole).normalize();
+    let backup = (Vec3::Z.cross(pole)).try_normalize().unwrap_or(backup);
+    // Arm pose for a wrist target and an elbow swing (0 = towards the pole).
     let solve = |target: Vec3, swivel: f32| {
         let to = target - shoulder;
         let axis = to.try_normalize().unwrap_or(Vec3::NEG_Z);
         let d = to.length().clamp((l1 - l2).abs() + 0.01, l1 + l2 - 0.01);
         let reach = (l1 * l1 - l2 * l2 + d * d) / (2. * d);
         let up = (l1 * l1 - reach * reach).max(0.).sqrt();
-        let base = (pole - axis * pole.dot(axis)).try_normalize().unwrap_or_else(|| axis.any_orthonormal_vector());
+        // The swivel is measured from the pole; when the arm points nearly along it, a second
+        // reference across it takes over smoothly so the measure never flips.
+        let across = |v: Vec3| v - axis * v.dot(axis);
+        let base = (across(pole) + across(backup) * 0.35)
+            .try_normalize()
+            .unwrap_or_else(|| axis.any_orthonormal_vector());
         let side = Quat::from_axis_angle(axis, swivel) * base;
         let elbow = shoulder + axis * reach + side * up;
         let bone = (elbow - shoulder).normalize();
         let bend = (shoulder + axis * d - elbow).normalize();
-        let normal = bone.cross(bend).try_normalize().unwrap_or(side.cross(axis).normalize());
-        // Upper arm along the bone, rolled so the natural hinge lies across the bend; forearm is
-        // the natural elbow opened or closed about that hinge.
+        // The bend plane's normal (bone × forearm) is side × axis; taken directly it stays
+        // steady even with the arm straight, where the cross product would flip.
+        let normal = side.cross(axis).normalize();
         let u = (Quat::from_mat3(&macroquad::math::Mat3::from_cols(bone, normal.cross(bone), normal))
             * hinge_frame.inverse())
         .normalize();
         let f0 = u * elbow0;
         let f = (Quat::from_rotation_arc((f0 * along_fore).normalize(), bend) * f0).normalize();
-        (u, f)
+        // The elbow, plus a point out along the way it faces: distinct even with the arm straight.
+        (u, f, elbow, elbow + side * 4.)
     };
-    let wrap = |a: f32| {
-        let a = a.rem_euclid(std::f32::consts::TAU);
-        a.min(std::f32::consts::TAU - a)
-    };
-    // Natural wrist first, then staying near the preferred elbow side and the grip's own turn,
-    // then staying close to the last frame's choice so nothing flips from one frame to the next.
     // Twist of a wrist rotation away from the natural one about the forearm axis, and the rest.
     let twist_of = |wrist: Quat| {
         let d = (wrist0.inverse() * wrist).normalize();
@@ -3897,7 +3957,7 @@ fn solve_arm_grip(
         let angle = 2. * t.w.min(1.).acos() * if vec3(t.x, t.y, t.z).dot(axis) < 0. { -1. } else { 1. };
         (angle, (t.inverse() * d).normalize().angle_between(Quat::IDENTITY))
     };
-    // How deep the upper arm and forearm pass into the head and chest.
+    // How deep a bone passes into the head and chest.
     let through = |a: Vec3, b: Vec3| {
         avoid
             .iter()
@@ -3908,54 +3968,96 @@ fn solve_arm_grip(
             })
             .sum::<f32>()
     };
-    let cost = |target: Vec3, hand: Quat, roll: f32, swivel: f32| {
-        let (u, f) = solve(target, swivel);
-        let elbow = shoulder + u * along_upper * l1;
+    let cost = |c: ArmChoice| {
+        let (target, hand, preference) = grip(c.a, c.b);
+        let (_, f, elbow, facing) = solve(target, c.swivel);
+        let (twist, swing) = twist_of((f.inverse() * hand).normalize());
+        let wrist_cost = (twist.abs() * 1.2 + swing * 0.35) * hold;
         let reached = elbow + f * along_fore * l2;
         let clip = through(shoulder, elbow) + through(elbow, reached);
-        let (twist, swing) = twist_of((f.inverse() * hand).normalize());
-        let bend = (twist.abs() * 1.5 + swing * 0.4) * hold;
-        let keep = prev.map_or(0., |(r, s)| (roll - r).abs() + wrap(swivel - s));
-        bend + 0.3 * wrap(swivel) + 0.25 * roll.abs() + 0.8 * keep + 6. * clip
+        // Elbows hang: they rise above the shoulder only when the hand does.
+        let raised = (elbow.z - shoulder.z.max(reached.z) + 1.).max(0.) / 4.;
+        // Continuity is judged by where the elbow is, not by the swing angle: with the hand near
+        // the shoulder a tiny hand move swings the shoulder-wrist line, and the angle with it.
+        let keep = prev.map_or(0., |p| {
+            wrap_pi(c.a - p.a).abs() + (c.b - p.b).abs() * 0.1 + elbow_local(facing).distance(p.elbow) * 0.25
+        });
+        wrist_cost + 0.9 * wrap_pi(c.swivel).abs() + raised + preference + 0.4 * keep + 6. * clip
     };
-    let mut best = (0usize, 0f32, f32::INFINITY);
-    let starts = prev.map(|(_, s)| s);
-    for g in 0..grips.max(1) {
-        let (target, hand, roll) = grip(g);
-        for k in 0..36 {
-            let swivel = (k as f32 / 36. - 0.5) * std::f32::consts::TAU;
-            let c = cost(target, hand, roll, swivel);
-            if c < best.2 {
-                best = (g, swivel, c);
-            }
-        }
-        if let Some(swivel) = starts {
-            let c = cost(target, hand, roll, swivel);
-            if c < best.2 {
-                best = (g, swivel, c);
+    let steps = |(lo, hi): (f32, f32), n: usize| {
+        (0..n).map(move |i| if n == 1 { (lo + hi) * 0.5 } else { lo + (hi - lo) * i as f32 / (n - 1) as f32 })
+    };
+    let a_n = if a_range.1 > a_range.0 { 13 } else { 1 };
+    let b_n = if b_range.1 > b_range.0 { 5 } else { 1 };
+    let prev = prev.map(|p| ArmChoice {
+        a: wrap_pi(p.a).clamp(a_range.0, a_range.1),
+        b: p.b.clamp(b_range.0.min(b_range.1), b_range.1.max(b_range.0)),
+        swivel: wrap_pi(p.swivel),
+        elbow: p.elbow,
+    });
+    let mut best = (prev.unwrap_or_default(), f32::INFINITY);
+    if let Some(p) = prev {
+        best = (p, cost(p));
+    }
+    for a in steps(a_range, a_n) {
+        for b in steps(b_range, b_n) {
+            for k in 0..24 {
+                let c = ArmChoice { a, b, swivel: (k as f32 / 24. - 0.5) * std::f32::consts::TAU, elbow: Vec3::ZERO };
+                let v = cost(c);
+                if v < best.1 {
+                    best = (c, v);
+                }
             }
         }
     }
-    let (target, hand, roll) = grip(best.0);
-    let mut step = std::f32::consts::TAU / 72.;
-    for _ in 0..6 {
-        for cand in [best.1 - step, best.1 + step] {
-            let c = cost(target, hand, roll, cand);
-            if c < best.2 {
-                best = (best.0, cand, c);
+    // Refine continuously around the best.
+    let mut step = [
+        (a_range.1 - a_range.0) / (a_n as f32).max(2.),
+        (b_range.1 - b_range.0) / (b_n as f32).max(2.),
+        std::f32::consts::TAU / 48.,
+    ];
+    for _ in 0..8 {
+        for axis in 0..3 {
+            for sign in [-1., 1.] {
+                let mut c = best.0;
+                match axis {
+                    0 => c.a = (c.a + sign * step[0]).clamp(a_range.0, a_range.1),
+                    1 => c.b = (c.b + sign * step[1]).clamp(b_range.0, b_range.1),
+                    _ => c.swivel = wrap_pi(c.swivel + sign * step[2]),
+                }
+                let v = cost(c);
+                if v < best.1 {
+                    best = (c, v);
+                }
             }
         }
-        step *= 0.5;
+        step = step.map(|s| s * 0.5);
     }
-    let (u, f) = solve(target, best.1);
+    // Ease from last frame's choice, and never faster than a hand can turn or slide.
+    let follow = if dt > 0. { 1. - (-dt * 14.).exp() } else { 1. };
+    let limit = |d: f32, rate: f32| if dt > 0. { d.clamp(-rate * dt, rate * dt) } else { d };
+    let mut c = match prev {
+        Some(p) => ArmChoice {
+            a: wrap_pi(p.a + limit(wrap_pi(best.0.a - p.a) * follow, 5.)).clamp(a_range.0, a_range.1),
+            b: p.b + limit((best.0.b - p.b) * follow, 40.),
+            swivel: best.0.swivel,
+            elbow: Vec3::ZERO,
+        },
+        None => best.0,
+    };
+    let (target, hand, _) = grip(c.a, c.b);
+    let (u, f, _, facing) = solve(target, c.swivel);
+    c.elbow = elbow_local(facing);
     let hand = (f * wrist0).slerp(hand, hold).normalize();
     // Share what twist is left between the wrist and the forearm, so neither wrings.
+    // The share fades out towards a half turn, where the twist's sign wraps, so it never flips.
     let (twist, _) = twist_of((f.inverse() * hand).normalize());
-    let f = (f * Quat::from_axis_angle(along_fore, twist * 0.5)).normalize();
+    let fade = hh_smooth((std::f32::consts::PI - twist.abs()) / 1.2);
+    let f = (f * Quat::from_axis_angle(along_fore, twist * 0.5 * fade)).normalize();
     pose[upper].rotation = (parent.inverse() * u).normalize();
     pose[fore].rotation = (u.inverse() * f).normalize();
     pose[h].rotation = (f.inverse() * hand).normalize();
-    (roll, best.1)
+    c
 }
 
 /// Two-bone reach of one arm: put the wrist at `goal`, bending the elbow towards `pole`
@@ -4028,7 +4130,9 @@ mod hobby_probe {
         let clip = |n: &str| Animation::parse(&std::fs::read(d.join(format!("{n}.ska"))).unwrap(), sk.bones.len()).unwrap();
         let text = std::fs::read_to_string(std::env::var("HOBBY_TWOHAND").unwrap()).unwrap();
         let mut hh = TwoHand::parse(&text, &sk).expect("twohand");
+        hh.set_natural(&sk, &clip("ready_bw").sample(0., true));
         hh.weight = 1.;
+        let left_palm = sk.bones.iter().position(|b| b.name == "tag_ball_linked").unwrap();
         let tag = sk.bones.iter().position(|b| b.name == "tag_weapon").unwrap();
         let mut report = String::new();
         let mut worst = [0f32; 4];
@@ -4091,16 +4195,27 @@ mod hobby_probe {
             std::fs::write(out.join("faces.bin"), faces).unwrap();
         }
         let mut clip_name = String::new();
+        let mut last_arms: Option<Vec<Quat>> = None;
+        let mut jumps: Vec<(f32, String)> = Vec::new();
         for (name, mut pose, play) in cases {
             // Each clip is its own continuous run.
             let this = name.rsplit_once('_').map_or(name.clone(), |(a, _)| a.to_string());
             if this != clip_name {
                 hh.last = [None; 2];
+                hh.last_arms = None;
                 clip_name = this;
+                last_arms = None;
             }
             let auth = sk.global_pose(&pose);
-            hh.apply(0.0, true, play, &sk, tag, &mut pose);
+            hh.apply(1. / 30., true, play, &sk, tag, &mut pose);
             let world = sk.global_pose(&pose);
+            let arms: Vec<Quat> = hh.right.iter().chain(hh.left.iter()).map(|&b| pose[b].rotation).collect();
+            if let Some(prev) = &last_arms {
+                let d: Vec<f32> = arms.iter().zip(prev).map(|(a, b)| a.angle_between(*b).to_degrees()).collect();
+                let m = d.iter().copied().fold(0f32, f32::max);
+                jumps.push((m, format!("{name} {:?} choice {:?}", d.iter().map(|v| *v as i32).collect::<Vec<_>>(), hh.last)));
+            }
+            last_arms = Some(arms);
             // Wrist rotation away from the authored one (both relative to the forearm).
             let rw = wrist(&world, rf, rh).angle_between(wrist(&auth, rf, rh)).to_degrees();
             let lw = wrist(&world, lf, lh).angle_between(wrist(&auth, lf, lh)).to_degrees();
@@ -4120,7 +4235,7 @@ mod hobby_probe {
             // Elbow: change of the forearm about its own bone (forearm frame).
             let ret = tw((el(&auth, ru, rf).inverse() * el(&world, ru, rf)).normalize(), fa(rh));
             let let_ = tw((el(&auth, lu, lf).inverse() * el(&world, lu, lf)).normalize(), fa(lh));
-            let rest = hh.rest_wrists.unwrap();
+            let rest = hh.natural.unwrap().map(|n| n.1);
             // Wrist: change about the forearm's axis, seen from the hand.
             let rwt = tw((rest[0].inverse() * wrist(&world, rf, rh)).normalize(), rest[0].inverse() * fa(rh));
             let lwt = tw((rest[1].inverse() * wrist(&world, lf, lh)).normalize(), rest[1].inverse() * fa(lh));
@@ -4138,7 +4253,7 @@ mod hobby_probe {
             // Left palm distance to the shaft line and grip position along it.
             let start = world[tag].point(hh.origin);
             let axis = world[tag].rotation * hh.direction;
-            let lp = world[hh.left_palm].translation;
+            let lp = world[left_palm].translation;
             let along = (lp - start).dot(axis);
             let off = ((lp - start) - axis * along).length();
             let out_of_range = (hh.range.0 - along).max(along - hh.range.1).max(0.);
@@ -4161,7 +4276,15 @@ mod hobby_probe {
             std::fs::write(out.join(format!("{name}.bin")), bytes).unwrap();
         }
         report += &format!("WORST wrist R {:.0} L {:.0}\n", worst_wrist[0], worst_wrist[1]);
-        if let Some(r) = hh.rest_wrists {
+        jumps.sort_by(|a, b| b.0.total_cmp(&a.0));
+        report += &format!("JUMPS (deg per 1/30 s) {:?}\n", &jumps[..8.min(jumps.len())]);
+        report += &format!(
+            "JUMP COUNT >40: {} >25: {} of {}\n",
+            jumps.iter().filter(|j| j.0 > 40.).count(),
+            jumps.iter().filter(|j| j.0 > 25.).count(),
+            jumps.len()
+        );
+        if let Some(r) = hh.natural.map(|n| n.map(|n| n.1)) {
             report += &format!("REST wrist from straight R {:.0} L {:.0}\n", r[0].angle_between(Quat::IDENTITY).to_degrees(), r[1].angle_between(Quat::IDENTITY).to_degrees());
         }
         for n in ["ready_bw", "walk_bigwep", "mallet_att_3_prim_01", "mallet_att_3_alt"] {
