@@ -171,13 +171,38 @@ pub static NvOptimusEnablement: u32 = 1;
 #[cfg(target_os = "freebsd")]
 const PS5_TITLE_DIR: &str = "/data/homebrew/PPSA99641";
 
+/// Standard error only reaches the console's klog once the window platform has started, so
+/// start-up failures (missing game data, bad title folder, a panic) would vanish. Append them to
+/// a file the user can fetch over FTP: `<title folder>/private/startup.log`, else `/data/lg-startup.log`.
+#[allow(dead_code)]
+fn startup_log(message: &str) {
+    use std::io::Write;
+    eprintln!("{message}");
+    let title_log = std::path::Path::new("/data/homebrew/PPSA99641/private");
+    let _ = std::fs::create_dir_all(title_log);
+    for path in [title_log.join("startup.log"), std::path::PathBuf::from("/data/lg-startup.log")] {
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{message}");
+            return;
+        }
+    }
+}
+
 fn main() {
     #[cfg(target_os = "freebsd")]
-    if let Err(error) = std::env::set_current_dir(PS5_TITLE_DIR) {
-        eprintln!("Looking Glass: cannot enter {PS5_TITLE_DIR}: {error}");
+    {
+        startup_log("Looking Glass: starting");
+        std::panic::set_hook(Box::new(|info| startup_log(&format!("Looking Glass: panic: {info}"))));
+        if let Err(error) = std::env::set_current_dir(PS5_TITLE_DIR) {
+            startup_log(&format!("Looking Glass: cannot enter {PS5_TITLE_DIR}: {error}"));
+        }
     }
     if let Err(error) = run() {
-        eprintln!("Looking Glass: {error:#}");
+        let message = format!("Looking Glass: {error:#}");
+        #[cfg(target_os = "freebsd")]
+        startup_log(&message);
+        #[cfg(not(target_os = "freebsd"))]
+        eprintln!("{message}");
         std::process::exit(1);
     }
 }
