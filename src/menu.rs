@@ -1355,6 +1355,29 @@ impl Menu {
             Some(Action::Resume)
         }
     }
+    /// Renders the options mirror alone and saves it, to compare the GL and Vulkan back ends.
+    pub async fn mirror_check(assets: &mut Assets, out: &str) -> Result<()> {
+        // Probe 1: a plain 2D clear into a depth render target; probe 2: the same in 3D.
+        let mut menu = Menu::load(assets)?;
+        for _ in 0..4 {
+            menu.draw_mirror();
+            clear_background(BLUE);
+            draw_texture_ex(
+                &menu.mirror_target.texture,
+                0.,
+                0.,
+                WHITE,
+                DrawTextureParams { dest_size: Some(vec2(384., 480.)), flip_y: true, ..Default::default() },
+            );
+            next_frame().await;
+        }
+        let image = menu.mirror_target.texture.get_texture_data();
+        let inside = image.bytes.chunks(4).filter(|p| p[3] > 8).count();
+        image.export_png(out);
+        println!("mirror: {inside} visible pixels of {}", image.bytes.len() / 4);
+        anyhow::ensure!(inside > 5_000, "Mirror rendered no Alice");
+        Ok(())
+    }
     fn draw_mirror(&mut self) {
         let eye = vec3(125., 0., 38.);
         set_camera(&Camera3D {

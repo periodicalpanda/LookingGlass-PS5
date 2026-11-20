@@ -529,6 +529,7 @@ fn run() -> Result<()> {
             "--decorations-render-check" => mode = "decorations-render",
             "--animation-render" => mode = "animation-render",
             "--facial-render" => mode = "facial-render",
+            "--mirror-check" => mode = "mirror-check",
             "--list" => mode = "list",
             "--duchess-render" => mode = "duchess-render",
             "--duchess-check" => mode = "duchess",
@@ -1210,6 +1211,16 @@ fn run() -> Result<()> {
                 eprintln!("Presentation render failed: {e:#}");
                 std::process::exit(1);
             }
+        });
+        return Ok(());
+    }
+    if mode == "mirror-check" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = menu::Menu::mirror_check(&mut assets, "/tmp/mirror.png").await {
+                eprintln!("Mirror check failed: {e:#}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
         });
         return Ok(());
     }

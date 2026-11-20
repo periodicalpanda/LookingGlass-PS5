@@ -450,7 +450,15 @@ impl Inner {
 
     fn tex(&self, id: TextureId) -> &Texture {
         match id.0 {
-            TextureIdInner::Managed(i) => self.textures[i].as_ref().expect("deleted texture"),
+            // A texture the game deleted but still draws with (seen in the first cutscene) must not
+            // take the console down; GL just samples nothing. Fall back to the default colour image.
+            TextureIdInner::Managed(i) => match self.textures.get(i).and_then(|t| t.as_ref()) {
+                Some(t) => t,
+                None => {
+                    crate::native::ps5_trace(format_args!("vk: draw used deleted texture {i}"));
+                    self.textures[0].as_ref().expect("default colour texture")
+                }
+            },
             TextureIdInner::Raw(_) => panic!("raw texture ids are not supported by the Vulkan backend"),
         }
     }
@@ -1196,14 +1204,18 @@ impl RenderingBackend for VulkanContext {
     fn texture_read_pixels(&mut self, texture: TextureId, bytes: &mut [u8]) {
         let mut s = self.0.borrow_mut();
         unsafe { s.read_pixels(texture, bytes) }
+        if dbg_flag("MQVK_TRACE") { eprintln!("read {:?} {} bytes -> {} nonzero active={}", match texture.0 { TextureIdInner::Managed(i) => i, _ => 9999 }, bytes.len(), bytes.iter().filter(|b| **b != 0).count(), s.active.is_some()); }
     }
 
     fn texture_update_part(&mut self, texture: TextureId, x_offset: i32, y_offset: i32, width: i32, height: i32, bytes: &[u8]) {
         unsafe { self.0.borrow_mut().texture_update_part(texture, x_offset, y_offset, width, height, bytes) }
     }
 
-    fn new_render_pass_mrt(&mut self, color_img: &[TextureId], _resolve_img: Option<&[TextureId]>, depth_img: Option<TextureId>) -> RenderPass {
+    fn new_render_pass_mrt(&mut self, color_img: &[TextureId], resolve_img: Option<&[TextureId]>, depth_img: Option<TextureId>) -> RenderPass {
         let mut s = self.0.borrow_mut();
+        // Every image here is single-sampled, so there is nothing to resolve: render straight into
+        // the resolve targets (the textures macroquad samples from) instead of leaving them empty.
+        let color_img = resolve_img.filter(|r| r.len() == color_img.len()).unwrap_or(color_img);
         let mut key = RpKey { colors: [vk::Format::UNDEFINED; 4], ncolors: color_img.len() as u8, depth: vk::Format::UNDEFINED };
         let mut views = vec![];
         let (mut w, mut h) = (u32::MAX, u32::MAX);
