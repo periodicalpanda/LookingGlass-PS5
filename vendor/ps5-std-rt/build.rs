@@ -75,11 +75,19 @@ fn main() {
     // modules (libc.prx, libSceLibcInternal) and the payload SDK fork's platform layer, as
     // PS5_VulkanTemplate's titles do; a second, static libc would clash with RADV's.
     println!("cargo:rerun-if-env-changed=PS5_STD_RT_TITLE");
-    if env::var_os("PS5_STD_RT_TITLE").is_none() {
+    println!("cargo:rustc-check-cfg=cfg(ps5_title)");
+    let title = env::var_os("PS5_STD_RT_TITLE").is_some();
+    if title {
+        // src/lib.rs: no raw syscalls from the title (the console kills the process for them).
+        println!("cargo:rustc-cfg=ps5_title");
+    } else {
         println!("cargo:rustc-link-lib=static=ps5c");
     }
 
-    gen_syscall_stubs(&sdk, &work, &out);
+    // In a title the raw stubs are only for names no console module exports: the rest resolve to
+    // libkernel/libc, which do the syscall from inside libkernel and set errno properly.
+    let exported = if title { console_exports(&sdk) } else { Default::default() };
+    gen_syscall_stubs(&sdk, &work, &out, &exported);
     let _ = fs::remove_dir_all(&work);
 }
 
@@ -99,7 +107,38 @@ fn main() {
 /// Stubs src/lib.rs defines itself.
 const STUB_SKIP: &[&str] = &["fstatat", "faccessat", "readlinkat", "clock_nanosleep", "accept"];
 
-pub fn gen_syscall_stubs(sdk: &std::path::Path, work: &std::path::Path, out: &std::path::Path) {
+/// Names the console's modules export, from the SDK's stub libraries (the set ps5/link-title.sh
+/// binds imports against: libkernel_sys and libScePosixForWebKit are not loaded by a title).
+fn console_exports(sdk: &std::path::Path) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let libs = fs::read_dir(sdk.join("target/lib")).expect("reading the SDK's target/lib");
+    for entry in libs.flatten() {
+        let path = entry.path();
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !file.ends_with(".so") || file == "libkernel_sys.so" || file == "libScePosixForWebKit.so" {
+            continue;
+        }
+        let nm = Command::new(sdk.join("bin/llvm-nm"))
+            .args(["-D", "--defined-only"])
+            .arg(&path)
+            .output()
+            .expect("running llvm-nm");
+        for line in String::from_utf8_lossy(&nm.stdout).lines() {
+            if let Some(name) = line.split_whitespace().last() {
+                names.insert(name.to_owned());
+            }
+        }
+    }
+    assert!(names.contains("sceKernelStat"), "the SDK's libkernel stub does not export sceKernelStat");
+    names
+}
+
+pub fn gen_syscall_stubs(
+    sdk: &std::path::Path,
+    work: &std::path::Path,
+    out: &std::path::Path,
+    exported: &std::collections::HashSet<String>,
+) {
     let status = Command::new(sdk.join("bin/llvm-ar"))
         .current_dir(work)
         .arg("x")
@@ -155,7 +194,7 @@ pub fn gen_syscall_stubs(sdk: &std::path::Path, work: &std::path::Path, out: &st
     );
     let mut count = 0;
     for (name, ins) in &funcs {
-        if STUB_SKIP.contains(&name.as_str()) {
+        if STUB_SKIP.contains(&name.as_str()) || exported.contains(name.as_str()) {
             continue;
         }
         let body = if ins.iter().map(String::as_str).eq(GENERIC.iter().copied()) {
@@ -187,6 +226,12 @@ pub fn gen_syscall_stubs(sdk: &std::path::Path, work: &std::path::Path, out: &st
         );
         count += 1;
     }
-    assert!(count > 200, "only {count} syscall stubs found in the SDK's syscalls.o");
+    assert!(
+        count > 200 || !exported.is_empty(),
+        "only {count} syscall stubs found in the SDK's syscalls.o"
+    );
+    if !exported.is_empty() {
+        println!("cargo:warning=ps5-std-rt (title): {count} raw syscall stubs kept, the rest come from the console's libraries");
+    }
     fs::write(out.join("syscalls.s"), asm).unwrap();
 }

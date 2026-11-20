@@ -24,6 +24,7 @@
 //! - a blocking `accept` that waits in kevent first: a thread asleep in
 //!   accept when the console enters rest mode powers it off; recv,
 //!   recvfrom and recvmsg wait the same way.
+#![cfg_attr(ps5_title, allow(dead_code))]
 use core::ffi::{c_char, c_int, c_void};
 
 const F_SETFD: c_int = 2;
@@ -106,6 +107,41 @@ extern "C" {
     fn __error() -> *mut c_int;
 }
 
+// A PS5 title may not issue syscalls itself: the console kills a process that does
+// ("PPRBUG-22859: directly issued a syscall", SYSTEM_ILLEGAL_FUNCTION_CALL); only code inside
+// libkernel may. Under PS5_STD_RT_TITLE (cfg ps5_title, set by build.rs) every call that
+// would use `syscall6` goes through libkernel's own exports instead (the underscore names
+// are libkernel's non-interposed entry points, and sceKernelStat/Fstat have no clash with
+// the shims below that carry the plain names).
+#[cfg(ps5_title)]
+extern "C" {
+    fn sceKernelStat(path: *const c_char, buf: *mut c_void) -> c_int;
+    fn sceKernelFstat(fd: c_int, buf: *mut c_void) -> c_int;
+    fn _fcntl(fd: c_int, cmd: c_int, arg: usize) -> c_int;
+    fn _accept(fd: c_int, addr: *mut c_void, len: *mut u32) -> c_int;
+    fn _recvfrom(fd: c_int, buf: *mut c_void, len: usize, flags: c_int, from: *mut c_void, fromlen: *mut u32) -> isize;
+    fn _recvmsg(fd: c_int, msg: *mut c_void, flags: c_int) -> isize;
+    fn _getsockopt(fd: c_int, level: c_int, name: c_int, val: *mut c_void, len: *mut u32) -> c_int;
+    fn kqueue() -> c_int;
+    fn kevent(kq: c_int, ch: *const c_void, nch: c_int, ev: *mut c_void, nev: c_int, timeout: *const c_void) -> c_int;
+    fn nanosleep(rq: *const Timespec, rm: *mut Timespec) -> c_int;
+    fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
+    fn access(path: *const c_char, mode: c_int) -> c_int;
+}
+
+/// sceKernel* calls return 0x8002_0000 | errno on failure; turn that into -1 + errno.
+#[cfg(ps5_title)]
+unsafe fn sce_result(r: c_int) -> c_int {
+    if r < 0 {
+        if (r as u32) >> 16 == 0x8002 {
+            *__error() = (r as u32 & 0xffff) as c_int;
+        }
+        -1
+    } else {
+        r
+    }
+}
+
 /// FreeBSD syscall: on error the carry flag is set and rax holds errno.
 unsafe fn syscall6(n: u64, a: [u64; 6]) -> i64 {
     let ret: i64;
@@ -128,6 +164,9 @@ unsafe fn syscall6(n: u64, a: [u64; 6]) -> i64 {
     }
 }
 
+// In a title `kevent` is the console's own (FreeBSD 11 struct kevent): tokio/mio would need the
+// widening below, which can't call libkernel's kevent under the same name.
+#[cfg(not(ps5_title))]
 #[no_mangle]
 pub unsafe extern "C" fn kevent(
     kq: c_int,
@@ -191,7 +230,14 @@ const F_DUPFD: c_int = 0;
 const F_DUPFD_CLOEXEC: c_int = 17;
 
 unsafe fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> c_int {
-    syscall6(SYS_FCNTL, [fd as u64, cmd as u64, arg as u64, 0, 0, 0]) as c_int
+    #[cfg(ps5_title)]
+    {
+        _fcntl(fd, cmd, arg)
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_FCNTL, [fd as u64, cmd as u64, arg as u64, 0, 0, 0]) as c_int
+    }
 }
 
 #[no_mangle]
@@ -307,31 +353,65 @@ unsafe fn widen_stat(old: &Stat11, out: *mut Stat12) {
     };
 }
 
-/// Runs a FreeBSD 11 stat-style syscall into a temporary and widens it.
-unsafe fn stat_call(n: u64, args: [u64; 6], buf_arg: usize, out: *mut Stat12) -> c_int {
-    let mut old: Stat11 = core::mem::zeroed();
-    let mut a = args;
-    a[buf_arg] = &mut old as *mut Stat11 as u64;
-    let ret = syscall6(n, a);
-    if ret == 0 {
-        widen_stat(&old, out);
+unsafe fn k_stat(path: *const c_char, buf: *mut Stat11) -> c_int {
+    #[cfg(ps5_title)]
+    {
+        sce_result(sceKernelStat(path, buf.cast()))
     }
-    ret as c_int
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_STAT11, [path as u64, buf as u64, 0, 0, 0, 0]) as c_int
+    }
+}
+
+unsafe fn k_lstat(path: *const c_char, buf: *mut Stat11) -> c_int {
+    #[cfg(ps5_title)]
+    {
+        sce_result(sceKernelStat(path, buf.cast())) // no symlinks on the console's filesystems
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_LSTAT11, [path as u64, buf as u64, 0, 0, 0, 0]) as c_int
+    }
+}
+
+unsafe fn k_fstat(fd: c_int, buf: *mut Stat11) -> c_int {
+    #[cfg(ps5_title)]
+    {
+        sce_result(sceKernelFstat(fd, buf.cast()))
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_FSTAT11, [fd as u64, buf as u64, 0, 0, 0, 0]) as c_int
+    }
+}
+
+unsafe fn widened(ret: c_int, old: &Stat11, out: *mut Stat12) -> c_int {
+    if ret == 0 {
+        widen_stat(old, out);
+    }
+    ret
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut Stat12) -> c_int {
-    stat_call(SYS_STAT11, [path as u64, 0, 0, 0, 0, 0], 1, buf)
+    let mut old: Stat11 = core::mem::zeroed();
+    let ret = k_stat(path, &mut old);
+    widened(ret, &old, buf)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut Stat12) -> c_int {
-    stat_call(SYS_LSTAT11, [path as u64, 0, 0, 0, 0, 0], 1, buf)
+    let mut old: Stat11 = core::mem::zeroed();
+    let ret = k_lstat(path, &mut old);
+    widened(ret, &old, buf)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut Stat12) -> c_int {
-    stat_call(SYS_FSTAT11, [fd as u64, 0, 0, 0, 0, 0], 1, buf)
+    let mut old: Stat11 = core::mem::zeroed();
+    let ret = k_fstat(fd, &mut old);
+    widened(ret, &old, buf)
 }
 
 // fstatat: the SDK's lives in syscalls.o, which never gets linked (build.rs
@@ -340,19 +420,32 @@ const SYS_FSTATAT11: u64 = 493;
 
 #[no_mangle]
 pub unsafe extern "C" fn fstatat(fd: c_int, path: *const c_char, buf: *mut Stat12, flag: c_int) -> c_int {
-    stat_call(SYS_FSTATAT11, [fd as u64, path as u64, 0, flag as u64, 0, 0], 2, buf)
+    let mut old: Stat11 = core::mem::zeroed();
+    #[cfg(ps5_title)]
+    let ret = {
+        // libkernel has no fstatat: AT_FDCWD or an absolute path is plain stat.
+        if !at_cwd_or_absolute(fd, path) {
+            *__error() = ENOSYS;
+            return -1;
+        }
+        let _ = flag;
+        k_stat(path, &mut old)
+    };
+    #[cfg(not(ps5_title))]
+    let ret = syscall6(SYS_FSTATAT11, [fd as u64, path as u64, &mut old as *mut Stat11 as u64, flag as u64, 0, 0]) as c_int;
+    widened(ret, &old, buf)
 }
 
 // The SDK's own mktemp.o was compiled for the FreeBSD 11 `struct stat`;
 // build.rs points its stat/lstat calls here instead of at the wrappers above.
 #[no_mangle]
 unsafe extern "C" fn __ps5_stat11(path: *const c_char, buf: *mut c_void) -> c_int {
-    syscall6(SYS_STAT11, [path as u64, buf as u64, 0, 0, 0, 0]) as c_int
+    k_stat(path, buf.cast())
 }
 
 #[no_mangle]
 unsafe extern "C" fn __ps5_lstat11(path: *const c_char, buf: *mut c_void) -> c_int {
-    syscall6(SYS_LSTAT11, [path as u64, buf as u64, 0, 0, 0, 0]) as c_int
+    k_lstat(path, buf.cast())
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +505,7 @@ extern "C" {
 #[no_mangle]
 pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut Dir {
     let mut st: Stat11 = core::mem::zeroed();
-    if syscall6(SYS_FSTAT11, [fd as u64, &mut st as *mut Stat11 as u64, 0, 0, 0, 0]) != 0 {
+    if k_fstat(fd, &mut st) != 0 {
         return core::ptr::null_mut();
     }
     let cap = (st.blksize.max(0) as usize).clamp(DIRBUF_MIN, DIRBUF_MAX);
@@ -664,6 +757,18 @@ unsafe fn at_cwd_or_absolute(fd: c_int, path: *const c_char) -> bool {
     fd == AT_FDCWD || (!path.is_null() && *path == b'/' as c_char)
 }
 
+#[cfg(ps5_title)]
+#[no_mangle]
+pub unsafe extern "C" fn faccessat(fd: c_int, path: *const c_char, mode: c_int, flag: c_int) -> c_int {
+    // libkernel's access(2); it has no eaccess, and a title's real and effective ids match.
+    if !at_cwd_or_absolute(fd, path) || flag & !AT_EACCESS != 0 {
+        *__error() = ENOSYS;
+        return -1;
+    }
+    access(path, mode)
+}
+
+#[cfg(not(ps5_title))]
 #[no_mangle]
 pub unsafe extern "C" fn faccessat(fd: c_int, path: *const c_char, mode: c_int, flag: c_int) -> c_int {
     if !at_cwd_or_absolute(fd, path) || flag & !AT_EACCESS != 0 {
@@ -699,7 +804,17 @@ pub unsafe extern "C" fn readlinkat(fd: c_int, path: *const c_char, buf: *mut c_
         *__error() = ENOSYS;
         return -1;
     }
-    syscall6(SYS_READLINK, [path as u64, buf as u64, size as u64, 0, 0, 0]) as isize
+    // libkernel exports no readlink and the console's filesystems have no symlinks: not a link.
+    #[cfg(ps5_title)]
+    {
+        let _ = (buf, size);
+        *__error() = 22; // EINVAL
+        return -1;
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_READLINK, [path as u64, buf as u64, size as u64, 0, 0, 0]) as isize
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -715,10 +830,45 @@ const SYS_CLOCK_NANOSLEEP: u64 = 244;
 const TIMER_ABSTIME: c_int = 1;
 const EINVAL: c_int = 22;
 
+unsafe fn k_clock_nanosleep(clock: c_int, flags: c_int, rq: *const Timespec, rm: *mut Timespec) -> i64 {
+    #[cfg(ps5_title)]
+    {
+        let _ = (clock, flags, rq, rm);
+        *__error() = ENOSYS; // libkernel has none: take the nanosleep path below
+        -1
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_CLOCK_NANOSLEEP, [clock as u64, flags as u64, rq as u64, rm as u64, 0, 0])
+    }
+}
+
+unsafe fn k_clock_gettime(clock: c_int, ts: *mut Timespec) -> i64 {
+    #[cfg(ps5_title)]
+    {
+        clock_gettime(clock, ts) as i64
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_CLOCK_GETTIME, [clock as u64, ts as u64, 0, 0, 0, 0])
+    }
+}
+
+unsafe fn k_nanosleep(rq: *const Timespec, rm: *mut Timespec) -> i64 {
+    #[cfg(ps5_title)]
+    {
+        nanosleep(rq, rm) as i64
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_NANOSLEEP, [rq as u64, rm as u64, 0, 0, 0, 0])
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn clock_nanosleep(clock: c_int, flags: c_int, rq: *const Timespec, rm: *mut Timespec) -> c_int {
     let saved = *__error();
-    let ret = syscall6(SYS_CLOCK_NANOSLEEP, [clock as u64, flags as u64, rq as u64, rm as u64, 0, 0]);
+    let ret = k_clock_nanosleep(clock, flags, rq, rm);
     let err = *__error();
     *__error() = saved;
     if ret == 0 {
@@ -733,7 +883,7 @@ pub unsafe extern "C" fn clock_nanosleep(clock: c_int, flags: c_int, rq: *const 
     let mut req = *rq;
     if flags & TIMER_ABSTIME != 0 {
         let mut now = Timespec { sec: 0, nsec: 0 };
-        if syscall6(SYS_CLOCK_GETTIME, [clock as u64, &mut now as *mut _ as u64, 0, 0, 0, 0]) != 0 {
+        if k_clock_gettime(clock, &mut now) != 0 {
             let e = *__error();
             *__error() = saved;
             return e;
@@ -750,7 +900,7 @@ pub unsafe extern "C" fn clock_nanosleep(clock: c_int, flags: c_int, rq: *const 
     }
     // rm is only filled in for relative sleeps, as POSIX says.
     let rm = if flags & TIMER_ABSTIME != 0 { core::ptr::null_mut() } else { rm };
-    let ret = syscall6(SYS_NANOSLEEP, [&req as *const _ as u64, rm as u64, 0, 0, 0, 0]);
+    let ret = k_nanosleep(&req, rm);
     let err = *__error();
     *__error() = saved;
     if ret == 0 { 0 } else { err }
@@ -790,7 +940,14 @@ pub unsafe extern "C" fn accept(fd: c_int, addr: *mut c_void, len: *mut u32) -> 
     if wait_readable(fd) < 0 {
         return -1;
     }
-    syscall6(SYS_ACCEPT, [fd as u64, addr as u64, len as u64, 0, 0, 0]) as c_int
+    #[cfg(ps5_title)]
+    {
+        _accept(fd, addr, len)
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_ACCEPT, [fd as u64, addr as u64, len as u64, 0, 0, 0]) as c_int
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +985,9 @@ unsafe fn wait_socket_readable(fd: c_int, flags: c_int) -> c_int {
     let saved = *__error();
     let mut tv = Timeval { sec: 0, usec: 0 };
     let mut len = core::mem::size_of::<Timeval>() as u32;
+    #[cfg(ps5_title)]
+    let r = _getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &mut tv as *mut _ as *mut c_void, &mut len) as i64;
+    #[cfg(not(ps5_title))]
     let r = syscall6(SYS_GETSOCKOPT, [
         fd as u64, SOL_SOCKET as u64, SO_RCVTIMEO as u64,
         &mut tv as *mut _ as u64, &mut len as *mut _ as u64, 0,
@@ -846,6 +1006,9 @@ unsafe fn wait_socket_readable(fd: c_int, flags: c_int) -> c_int {
 /// return 0 so the caller falls back to its plain blocking call.
 unsafe fn kevent_wait(fd: c_int, timeout: *const Timespec) -> c_int {
     let saved = *__error();
+    #[cfg(ps5_title)]
+    let kq = kqueue() as i64;
+    #[cfg(not(ps5_title))]
     let kq = syscall6(SYS_KQUEUE, [0; 6]);
     if kq < 0 {
         *__error() = saved;
@@ -856,8 +1019,14 @@ unsafe fn kevent_wait(fd: c_int, timeout: *const Timespec) -> c_int {
         fflags: 0, data: 0, udata: core::ptr::null_mut(),
     };
     let mut ev = ch;
+    #[cfg(ps5_title)]
+    let r = kevent(kq as c_int, &ch as *const _ as *const c_void, 1, &mut ev as *mut _ as *mut c_void, 1, timeout.cast()) as i64;
+    #[cfg(not(ps5_title))]
     let r = syscall6(SYS_KEVENT, [kq as u64, &ch as *const _ as u64, 1, &mut ev as *mut _ as u64, 1, timeout as u64]);
     let err = *__error();
+    #[cfg(ps5_title)]
+    close(kq as c_int);
+    #[cfg(not(ps5_title))]
     syscall6(SYS_CLOSE, [kq as u64, 0, 0, 0, 0, 0]);
     if r < 0 && err == EINTR {
         *__error() = EINTR;
@@ -878,7 +1047,14 @@ pub unsafe extern "C" fn recvfrom(
     if wait_socket_readable(fd, flags) < 0 {
         return -1;
     }
-    syscall6(SYS_RECVFROM, [fd as u64, buf as u64, len as u64, flags as u64, from as u64, fromlen as u64]) as isize
+    #[cfg(ps5_title)]
+    {
+        _recvfrom(fd, buf, len, flags, from, fromlen)
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_RECVFROM, [fd as u64, buf as u64, len as u64, flags as u64, from as u64, fromlen as u64]) as isize
+    }
 }
 
 #[no_mangle]
@@ -891,5 +1067,12 @@ pub unsafe extern "C" fn recvmsg(fd: c_int, msg: *mut c_void, flags: c_int) -> i
     if wait_socket_readable(fd, flags) < 0 {
         return -1;
     }
-    syscall6(SYS_RECVMSG, [fd as u64, msg as u64, flags as u64, 0, 0, 0]) as isize
+    #[cfg(ps5_title)]
+    {
+        _recvmsg(fd, msg, flags)
+    }
+    #[cfg(not(ps5_title))]
+    {
+        syscall6(SYS_RECVMSG, [fd as u64, msg as u64, flags as u64, 0, 0, 0]) as isize
+    }
 }
