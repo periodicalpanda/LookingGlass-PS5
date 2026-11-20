@@ -270,6 +270,7 @@ where
         platform_init(b"Looking Glass\0".as_ptr() as *const c_char);
         if !pad_open() { eprintln!("ps5: no controller yet"); }
     }
+    eprintln!("ps5: pad ready, installing the presenter");
     vulkan::set_presenter(Box::new(DisplayPresenter {
         render: RENDER_SIZE,
         surface_fn: None,
@@ -282,6 +283,7 @@ where
         index: None,
     }));
     let size = (RENDER_SIZE.0 as i32, RENDER_SIZE.1 as i32);
+    eprintln!("ps5: running the application at {}x{}", size.0, size.1);
     crate::native::vulkan_headless::run_with(conf, size, f, |_handler: &mut dyn EventHandler| unsafe { poll_pads() });
     let _ = std::ptr::null::<c_void>();
 }

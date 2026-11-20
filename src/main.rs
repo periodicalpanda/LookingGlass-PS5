@@ -232,17 +232,35 @@ unsafe extern "C" fn crash_handler(signal: i32, _info: *mut u8, context: *mut u8
         line.bytes[line.len] = b'\n';
         unsafe { write(2, line.bytes.as_ptr(), line.len + 1) };
     }
-    // FreeBSD amd64 ucontext_t: a 16-byte signal mask, then mcontext_t (rip at +160, rsp at +184,
-    // the fault address mc_addr at +136, rax at +56, rdi at +8).
+    extern "C" {
+        fn sceKernelUsleep(microseconds: u32) -> i32;
+    }
+    say(format_args!("crash: signal {signal} context at {:#x}", context as usize));
+    // The context layout is not certain on the console: dump its first words raw (six per
+    // line), then use the FreeBSD amd64 ucontext_t offsets (16-byte mask, then mcontext_t:
+    // rip +160, rsp +184) only if they give a plausible stack pointer.
+    let words = context as *const usize;
+    for row in 0..10usize {
+        let base = row * 6;
+        say(format_args!(
+            "crash: ctx[{base:02}] {:016x} {:016x} {:016x} {:016x} {:016x} {:016x}",
+            *words.add(base), *words.add(base + 1), *words.add(base + 2),
+            *words.add(base + 3), *words.add(base + 4), *words.add(base + 5)
+        ));
+    }
     let word = |offset: usize| *(context.add(16 + offset) as *const usize);
     let (rip, rsp) = (word(160), word(184));
-    say(format_args!("crash: signal {signal} rip={rip:#x} rsp={rsp:#x} fault={:#x} rax={:#x} rdi={:#x}", word(136), word(56), word(8)));
-    for index in 0..192usize {
-        let value = *((rsp + index * 8) as *const usize);
-        if (0x400000..0x2538000).contains(&value) {
-            say(format_args!("crash: stack[{index}] = {value:#x}"));
+    say(format_args!("crash: rip={rip:#x} rsp={rsp:#x}"));
+    if (0x7_0000_0000..0x8_0000_0000).contains(&rsp) {
+        for index in 0..192usize {
+            let value = *((rsp + index * 8) as *const usize);
+            if (0x400000..0x2538000).contains(&value) {
+                say(format_args!("crash: stack[{index}] = {value:#x}"));
+            }
         }
     }
+    // stderr reaches klog through a pipe thread: give it time before the process goes down.
+    sceKernelUsleep(800_000);
 }
 
 #[allow(dead_code)]
