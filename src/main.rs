@@ -304,6 +304,11 @@ fn main() {
         let installed = unsafe { install_crash_handler() };
         startup_log(&format!("Looking Glass: crash handler installed for {installed} of 4 signals"));
     }
+    // The driver's shader disk cache crashes in the title sandbox (it cannot use /app0): turn it off.
+    #[cfg(target_os = "freebsd")]
+    for name in ["MESA_SHADER_CACHE_DISABLE", "MESA_GLSL_CACHE_DISABLE", "RADV_DISABLE_SHADER_CACHE"] {
+        std::env::set_var(name, "true");
+    }
     #[cfg(target_os = "freebsd")]
     if std::env::var_os("LOOKING_GLASS_SETTINGS_DIR").is_none() {
         std::env::set_var("LOOKING_GLASS_SETTINGS_DIR", title_path("private"));
