@@ -188,7 +188,24 @@ fn startup_log(message: &str) {
     }
 }
 
+/// A path inside the title folder. The console's sandbox refuses `chdir` into /data/homebrew
+/// (EPERM) while absolute paths there work, so on the PS5 nothing relies on the working directory.
+fn title_path(relative: &str) -> PathBuf {
+    #[cfg(target_os = "freebsd")]
+    {
+        PathBuf::from(PS5_TITLE_DIR).join(relative)
+    }
+    #[cfg(not(target_os = "freebsd"))]
+    {
+        PathBuf::from(relative)
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "freebsd")]
+    if std::env::var_os("LOOKING_GLASS_SETTINGS_DIR").is_none() {
+        std::env::set_var("LOOKING_GLASS_SETTINGS_DIR", title_path("private"));
+    }
     #[cfg(target_os = "freebsd")]
     {
         startup_log("Looking Glass: starting");
@@ -214,14 +231,14 @@ fn run() -> Result<()> {
     let mut o = Options {
         coop: None,
         difficulty: Default::default(),
-        save_dir: PathBuf::from("private/saves"),
+        save_dir: title_path("private/saves"),
         load: None,
         new_game: false,
-        data: std::fs::read_to_string("private/data-path.txt")
+        data: std::fs::read_to_string(title_path("private/data-path.txt"))
             .ok()
             .filter(|path| !path.trim().is_empty())
             .map(|path| PathBuf::from(path.trim()))
-            .unwrap_or_else(|| PathBuf::from(if cfg!(target_os = "freebsd") { "Alice1/bin/base" } else { "alice_202106/Alice1/bin/base" })),
+            .unwrap_or_else(|| if cfg!(target_os = "freebsd") { title_path("Alice1/bin/base") } else { PathBuf::from("alice_202106/Alice1/bin/base") }),
         map: "skool1".into(),
         direct_map: false,
         entry: None,
