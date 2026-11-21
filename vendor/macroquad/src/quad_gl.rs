@@ -294,7 +294,8 @@ struct PipelineExt {
 }
 
 impl PipelineExt {
-    fn set_uniform<T>(&mut self, name: &str, uniform: T) {
+    /// Returns whether any uniform byte changed.
+    fn set_uniform<T>(&mut self, name: &str, uniform: T) -> bool {
         let uniform_meta = self.uniforms.iter().find(
             |Uniform {
                  name: uniform_name, ..
@@ -302,7 +303,7 @@ impl PipelineExt {
         );
         if uniform_meta.is_none() {
             warn!("Trying to set non-existing uniform: {}", name);
-            return;
+            return false;
         }
         let uniform_meta = uniform_meta.unwrap();
         let uniform_format = uniform_meta.uniform_type;
@@ -316,19 +317,23 @@ impl PipelineExt {
                 uniform_byte_size,
                 std::mem::size_of::<T>()
             );
-            return;
+            return false;
         }
         if uniform_byte_size != uniform_meta.byte_size {
             warn!("set_uniform do not support uniform arrays");
-            return;
+            return false;
         }
+        let mut changed = false;
         macro_rules! transmute_uniform {
             ($uniform_size:expr, $byte_offset:expr, $n:expr) => {
                 if $uniform_size == $n {
                     let data: [u8; $n] = unsafe { std::mem::transmute_copy(&uniform) };
 
                     for i in 0..$uniform_size {
-                        self.uniforms_data[$byte_offset + i] = data[i];
+                        if self.uniforms_data[$byte_offset + i] != data[i] {
+                            changed = true;
+                            self.uniforms_data[$byte_offset + i] = data[i];
+                        }
                     }
                 }
             };
@@ -338,9 +343,10 @@ impl PipelineExt {
         transmute_uniform!(uniform_byte_size, uniform_byte_offset, 12);
         transmute_uniform!(uniform_byte_size, uniform_byte_offset, 16);
         transmute_uniform!(uniform_byte_size, uniform_byte_offset, 64);
+        changed
     }
 
-    fn set_uniform_array<T: ToBytes>(&mut self, name: &str, uniform: &[T]) {
+    fn set_uniform_array<T: ToBytes>(&mut self, name: &str, uniform: &[T]) -> bool {
         let uniform_meta = self.uniforms.iter().find(
             |Uniform {
                  name: uniform_name, ..
@@ -348,7 +354,7 @@ impl PipelineExt {
         );
         if uniform_meta.is_none() {
             warn!("Trying to set non-existing uniform: {}", name);
-            return;
+            return false;
         }
         let uniform_meta = uniform_meta.unwrap();
         let uniform_byte_size = uniform_meta.byte_size;
@@ -362,11 +368,16 @@ impl PipelineExt {
                 uniform_byte_size,
                 std::mem::size_of::<T>()
             );
-            return;
+            return false;
         }
+        let mut changed = false;
         for i in 0..uniform_byte_size {
-            self.uniforms_data[uniform_byte_offset + i] = data[i];
+            if self.uniforms_data[uniform_byte_offset + i] != data[i] {
+                changed = true;
+                self.uniforms_data[uniform_byte_offset + i] = data[i];
+            }
         }
+        changed
     }
 }
 
@@ -960,11 +971,14 @@ impl QuadGl {
     }
 
     pub fn set_uniform<T>(&mut self, pipeline: GlPipeline, name: &str, uniform: T) {
-        self.state.break_batching = true;
-
-        self.pipelines
+        // Only a changed value splits the batch; identical state keeps merging draws.
+        if self
+            .pipelines
             .get_quad_pipeline_mut(pipeline)
-            .set_uniform(name, uniform);
+            .set_uniform(name, uniform)
+        {
+            self.state.break_batching = true;
+        }
     }
     pub fn set_uniform_array<T: ToBytes>(
         &mut self,
@@ -972,11 +986,13 @@ impl QuadGl {
         name: &str,
         uniform: &[T],
     ) {
-        self.state.break_batching = true;
-
-        self.pipelines
+        if self
+            .pipelines
             .get_quad_pipeline_mut(pipeline)
-            .set_uniform_array(name, uniform);
+            .set_uniform_array(name, uniform)
+        {
+            self.state.break_batching = true;
+        }
     }
 
     pub fn set_texture(&mut self, pipeline: GlPipeline, name: &str, texture: Texture2D) {
