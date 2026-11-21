@@ -7,7 +7,7 @@
 | `vendor/miniquad/src/native/ps5c/platform.{c,h}` (PS5_VulkanTemplate, Mihawk) | MIT |
 | `vendor/ps5-std-rt` (neokuze/ps5-rust) and `ps5/targets/x86_64-sie-ps5-std.json` | GPL-3.0-or-later |
 | `ps5/link-title.sh` (follows PS5_VulkanTemplate's MIT `link-title.sh`) | MIT |
-| `ps5/sce_sys/icon0.png` (PS5_VulkanTemplate placeholder icon) | as in PS5_VulkanTemplate |
+| `ps5/sce_sys/icon0.png` (game cover art, supplied by the project owner) | n/a |
 
 A built title (`eboot.bin`) combines these with GPL-3.0 parts of the build stack (ps5-std-rt, the PS5
 payload SDK's startup code, PS5_Vulkan's RADV archive and tools). **Anyone distributing a build must
