@@ -1090,6 +1090,10 @@ impl Menu {
                         text: format!("Anti-Aliasing: {}", if msaa == 1 { "Off".to_owned() } else { format!("{msaa}x MSAA") }),
                         art: String::new(), hover: String::new(),
                         click: Click::Row(3), lettering: None, setting: None, hover_sound: String::new(), click_sound: String::new() });
+                    buttons.push(Button { rect: Rect::new(left, below + 14. + 60., 260., 26.),
+                        text: format!("HUD Position: {}", if self.draft.console_hud { "Console" } else { "Standard" }),
+                        art: String::new(), hover: String::new(),
+                        click: Click::Row(4), lettering: None, setting: None, hover_sound: String::new(), click_sound: String::new() });
                 }
                 let group = match page {
                     Page::Video => "group_video", Page::Audio => "group_audio", _ => "group_game",
@@ -1190,6 +1194,7 @@ impl Menu {
                 let next = (at + if delta < 0. { -1 } else { 1 }).rem_euclid(levels.len() as i32) as usize;
                 self.draft.msaa = levels[next];
             }
+            (Page::Video, 4) => self.draft.console_hud = !self.draft.console_hud,
             (Page::Audio, 0) => {
                 self.draft_audio.music = (self.draft_audio.music + delta * 0.05).clamp(0., 1.)
             }

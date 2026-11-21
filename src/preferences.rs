@@ -111,6 +111,8 @@ pub struct Preferences {
     pub anisotropy: u32,
     /// Multisample anti-aliasing: 1 (off), 2, 4 or 8. Vulkan (PS5) only.
     pub msaa: u32,
+    /// VorpalFix's console-style HUD position: meters pulled in from the screen edges and raised.
+    pub console_hud: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -130,6 +132,7 @@ impl Default for Preferences {
             gyro_aiming: false,
             anisotropy: 1,
             msaa: 1,
+            console_hud: false,
         }
     }
 }
