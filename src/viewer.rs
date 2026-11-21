@@ -3005,7 +3005,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 alice.draw_ghost(player.feet, fb, stats.invisible > 0. && !alice.glass_performing());
             }
         });
-        crate::lighting::select(lights, camera, &scene.world);
+        { let _p = crate::frame_profile::span("lighting_select");
+        crate::lighting::select(lights, camera, &scene.world); }
         crate::render_fx::begin_view(
             &world_camera,
             environment_clock,
@@ -3063,7 +3064,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         blood.draw_decals(pickup_clock);
         blood.draw(camera, &scene.atmosphere);
         level_art.story_pose(&story);
-        level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+        { let _p = crate::frame_profile::span("level_art_draw");
+        level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright); }
         power_art.draw(
             &pickups,
             &stats,
@@ -3076,6 +3078,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             audio.world_effect_at("sound/item/essence/small/mtespu.wav", origin);
         }
         {
+            let _p = crate::frame_profile::span("scene_particles_etc");
             scene.draw_with_particles(
                 camera,
                 (target - camera).normalize_or_zero(),
@@ -3092,7 +3095,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     b.draw_waves();
                 }
             }
-            level_art.effects(&interactions, camera, &scene.atmosphere);
+            { let _q = crate::frame_profile::span("level_art_effects");
+            level_art.effects(&interactions, camera, &scene.atmosphere); }
             alice.draw_effects(camera, fullbright, show_alice);
             let can_aim = !interactions.level_blocks_weapons() && !flying
                 && !pand_cinematic
@@ -3524,6 +3528,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             scene.world.body_clear(player.feet),
             player.jumps
         );
+    }
+    if std::env::var_os("LOOKING_GLASS_FRAME_PROFILE").is_some() {
+        let d = &scene.stats;
+        println!("Draw stats: {} batches drawn, {} culled, {} triangles, {} verts updated, {} uncullable, {} layer draws", d.batches, d.culled, d.triangles, d.verts, d.uncullable, d.layers);
     }
     println!(
         "Weapon actions: {} emitted, {} impacts",
