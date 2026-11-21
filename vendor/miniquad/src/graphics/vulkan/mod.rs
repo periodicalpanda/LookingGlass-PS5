@@ -1495,6 +1495,16 @@ impl RenderingBackend for VulkanContext {
             let a = match &action { PassAction::Nothing => "Nothing".to_string(), PassAction::Clear { color, depth, stencil } => format!("Clear({color:?},{depth:?},{stencil:?})") };
             eprintln!("begin {d} {a}");
         }
+        // macroquad ends and restarts the default pass around every batched draw call. Each
+        // boundary costs a full cache flush and serialises the GPU, so keep a LOAD pass open:
+        // restarting it with PassAction::Nothing would draw exactly the same pixels.
+        if pass.is_none() && matches!(action, PassAction::Nothing) && matches!(s.active.as_ref().map(|a| a.target), Some(Target::Default)) {
+            let a = s.active.as_ref().unwrap();
+            let (w, h) = (a.w as i32, a.h as i32);
+            s.viewport = (0, 0, w, h);
+            s.scissor = (0, 0, w, h);
+            return;
+        }
         unsafe {
             s.end_pass_inner();
             let target = match pass { None => Target::Default, Some(p) => Target::Pass(p.0) };
@@ -1506,7 +1516,13 @@ impl RenderingBackend for VulkanContext {
         }
     }
 
-    fn end_render_pass(&mut self) { unsafe { self.0.borrow_mut().end_pass_inner() } }
+    fn end_render_pass(&mut self) {
+        let mut s = self.0.borrow_mut();
+        // The default pass stays open for the next draw call (see begin_pass); frame commit,
+        // transfers, clears and other targets close it when they need to.
+        if matches!(s.active.as_ref().map(|a| a.target), Some(Target::Default)) { return; }
+        unsafe { s.end_pass_inner() }
+    }
 
     fn commit_frame(&mut self) {
         if dbg_flag("MQVK_TRACE") { eprintln!("commit"); }
