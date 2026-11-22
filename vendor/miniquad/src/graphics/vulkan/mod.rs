@@ -175,6 +175,8 @@ struct Inner {
     cmd: vk::CommandBuffer,
     upload: vk::CommandBuffer,
     upload_open: bool,
+    /// State already bound on the open command buffer, so repeat draws skip redundant commands.
+    bound: Bound,
     fence: vk::Fence,
     ring: Ring,
     frame: u64,
@@ -209,6 +211,15 @@ struct Inner {
     trash: Vec<Box<dyn FnOnce(&ash::Device, &mut Allocator)>>,
     presenter: Box<dyn Presenter>,
     info: ContextInfo,
+}
+
+#[derive(Default)]
+struct Bound {
+    pipeline: Option<vk::Pipeline>,
+    viewport: Option<(i32, i32, i32, i32)>,
+    scissor: Option<(i32, i32, i32, i32)>,
+    vbufs: Vec<(vk::Buffer, u64)>,
+    ibuf: Option<(vk::Buffer, u64)>,
 }
 
 pub struct VulkanContext(RefCell<Inner>);
@@ -306,6 +317,7 @@ impl Inner {
             cmd: cbs[0],
             upload: cbs[1],
             upload_open: false,
+            bound: Bound::default(),
             fence,
             ring: Ring { buf: vk::Buffer::null(), mem: std::mem::zeroed(), off: 0 },
             frame: 1,
@@ -371,6 +383,7 @@ impl Inner {
     }
 
     unsafe fn begin_cmd(&mut self) {
+        self.bound = Bound::default();
         vk_check(
             self.core.device.begin_command_buffer(self.cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)),
             "begin cmd",
@@ -835,6 +848,7 @@ impl Inner {
     }
 
     unsafe fn begin_target(&mut self, target: Target, action: Option<PassAction>) {
+        self.bound = Bound::default();
         let (key, fb, w, h) = match target {
             Target::Default => {
                 let t = self.tex(self.default_color);
@@ -1021,25 +1035,42 @@ impl Inner {
         let active = self.active.as_ref().unwrap();
         let _ = active;
         let pl = self.build_pipeline(pid, key);
-        let d = self.core.device.clone();
+        // ash::Device is a table of function pointers; cloning it per draw is pure overhead.
+        let d: &ash::Device = &*(&self.core.device as *const ash::Device);
         let cmd = self.cmd;
-        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pl);
+        if self.bound.pipeline != Some(pl) {
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pl);
+            self.bound.pipeline = Some(pl);
+        }
         let (vx, vy, vw, vh) = self.viewport;
-        d.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: vx as f32, y: vy as f32, width: vw.max(1) as f32, height: vh.max(1) as f32, min_depth: 0.0, max_depth: 1.0 }]);
+        if self.bound.viewport != Some((vx, vy, vw, vh)) {
+            d.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: vx as f32, y: vy as f32, width: vw.max(1) as f32, height: vh.max(1) as f32, min_depth: 0.0, max_depth: 1.0 }]);
+            self.bound.viewport = Some((vx, vy, vw, vh));
+        }
         let (sx, sy, sw, sh) = self.scissor;
         let (sx, sy) = (sx.max(0), sy.max(0));
         let sw = (sw.min(w as i32 - sx)).max(0);
         let sh = (sh.min(h as i32 - sy)).max(0);
-        d.cmd_set_scissor(cmd, 0, &[vk::Rect2D { offset: vk::Offset2D { x: sx, y: sy }, extent: vk::Extent2D { width: sw as u32, height: sh as u32 } }]);
+        if self.bound.scissor != Some((sx, sy, sw, sh)) {
+            d.cmd_set_scissor(cmd, 0, &[vk::Rect2D { offset: vk::Offset2D { x: sx, y: sy }, extent: vk::Extent2D { width: sw as u32, height: sh as u32 } }]);
+            self.bound.scissor = Some((sx, sy, sw, sh));
+        }
         if let Some((f, u)) = self.pipelines[pid].params.depth_write_offset { d.cmd_set_depth_bias(cmd, u, 0.0, f); }
         // Vertex and index buffers.
         for (i, b) in self.vbufs.iter().enumerate() {
             let b = &self.buffers[b.0];
-            d.cmd_bind_vertex_buffers(cmd, i as u32, &[b.current.0], &[b.current.1]);
+            if self.bound.vbufs.get(i) != Some(&(b.current.0, b.current.1)) {
+                d.cmd_bind_vertex_buffers(cmd, i as u32, &[b.current.0], &[b.current.1]);
+                if self.bound.vbufs.len() <= i { self.bound.vbufs.resize(i + 1, (vk::Buffer::null(), u64::MAX)); }
+                self.bound.vbufs[i] = (b.current.0, b.current.1);
+            }
         }
         let Some(ib) = self.ibuf else { return };
         let ib = &self.buffers[ib.0];
-        d.cmd_bind_index_buffer(cmd, ib.current.0, ib.current.1, ib.index_type);
+        if self.bound.ibuf != Some((ib.current.0, ib.current.1)) {
+            d.cmd_bind_index_buffer(cmd, ib.current.0, ib.current.1, ib.index_type);
+            self.bound.ibuf = Some((ib.current.0, ib.current.1));
+        }
         // Descriptors.
         let sh_ = &self.shaders[sid];
         let mut buf_infos = vec![];
