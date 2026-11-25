@@ -7,9 +7,12 @@ use macroquad::prelude::{Vec2, Vec3};
 
 pub const EYE_HEIGHT: f32 = 48.;
 pub const FIXED_DT: f32 = 1. / 120.;
-// Brisk walk: about two authored strides per second (51.3-51.7 units each).
-pub const WALK_SPEED: f32 = 52.;
-pub const RUN_SPEED: f32 = 173.;
+// Native pm.speed (fgamex86.dll FUN_100bac50) is the gait clip's root travel
+// per second (Player+0x480, set in FUN_100aa020) times 1.25 on the ground, and
+// double that with the tea flag. Walk clip 51.7/s * 1.25; run measured at 219.
+// Strides are paced by actual travel, so feet follow these speeds.
+pub const WALK_SPEED: f32 = 64.6;
+pub const RUN_SPEED: f32 = 219.;
 pub(crate) const STEP_HEIGHT: f32 = 18.;
 pub const GRAVITY: f32 = 800.;
 // Local Player jump event: half gravity in the ordinary, unpowered state.
@@ -950,7 +953,7 @@ mod tests {
     #[test]
     fn brisk_walking_speed_and_running_are_stable() {
         let world = floor();
-        for (run, fraction, expected) in [(false, 1., 52.), (false, 0.125, 6.5), (true, 1., 173.)]
+        for (run, fraction, expected) in [(false, 1., 64.6), (false, 0.125, 8.075), (true, 1., 219.)]
         {
             let mut p = Player::new(Vec3::Z * 0.04);
             let input = Controls {
