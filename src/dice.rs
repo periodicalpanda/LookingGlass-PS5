@@ -230,6 +230,9 @@ pub struct Demon {
     /// Emerge launch velocity (FUN_10061030): (direction x 100, 50), ballistic until it lands.
     #[serde(default)]
     hop: Vec3,
+    /// Time since the last 20 Hz actor think.
+    #[serde(default)]
+    think: f32,
 }
 impl Demon {
     fn scale(&self) -> f32 {
@@ -854,6 +857,7 @@ impl State {
                         shield: 0.,
                         unseen: 0.,
                         hop,
+                        think: 0.,
                     }
                 });
             }
@@ -1127,26 +1131,63 @@ impl State {
                         };
                         d.set(next);
                     }
-                } else if d.cooldown <= 0. && sees && range < 600. {
-                    self.seed = self.seed.wrapping_mul(214013).wrapping_add(2531011);
-                    let roll = (self.seed >> 16) & 0x7fff;
-                    let phase = if range < [120., 125., 120.][d.kind] {
-                        if d.kind == 1 && roll % 2 == 0 {
-                            Phase::Claw
-                        } else {
-                            Phase::Melee
-                        }
-                    } else if d.kind == 2 {
-                        if range >= 450. && roll % 5 != 0 || roll % 3 == 0 {
-                            Phase::ChargeStart
-                        } else if roll % 2 == 0 {
-                            Phase::Ice
-                        } else {
-                            Phase::Ranged
-                        }
-                    } else {
-                        Phase::Ranged
+                } else if let Some(phase) = {
+                    // Actor think runs at sv_fps = 20; the .st conditions are evaluated once per
+                    // think. ANIM_DONE (actor flag 6, set by the animation-done event) needs the
+                    // chase clip to have completed a cycle since the state was entered.
+                    d.think += STEP;
+                    let thinking = d.think + 1e-6 >= 0.05;
+                    if thinking {
+                        d.think -= 0.05;
+                    }
+                    let anim_done = d.phase == Phase::Move && d.time >= timing.duration;
+                    let mut roll = |p: f32| {
+                        self.seed = self.seed.wrapping_mul(214013).wrapping_add(2531011);
+                        (((self.seed >> 16) & 0x7fff) as f32 / 32768.) < p
                     };
+                    if !thinking || !sees {
+                        None
+                    } else {
+                        match d.kind {
+                            // c_demonlesser.st CHASE / ATTACK
+                            0 => {
+                                if (anim_done && range < 115.) || (range < 600. && roll(0.2)) {
+                                    Some(if range < 120. { Phase::Melee } else { Phase::Ranged })
+                                } else {
+                                    None
+                                }
+                            }
+                            // c_demon_normal.st CHASE: CLAW (0.5), TAIL, RANGED, all ANIM_DONE
+                            1 => {
+                                if !anim_done {
+                                    None
+                                } else if range < 125. {
+                                    Some(if roll(0.5) { Phase::Claw } else { Phase::Melee })
+                                } else if range < 600. {
+                                    Some(Phase::Ranged)
+                                } else {
+                                    None
+                                }
+                            }
+                            // c_demonking.st CHASE / ATTACK
+                            _ => {
+                                if range < 120. {
+                                    Some(Phase::Melee)
+                                } else if anim_done && roll(0.6) {
+                                    Some(if range >= 450. && roll(0.8) {
+                                        Phase::ChargeStart
+                                    } else if roll(0.666) {
+                                        if roll(0.5) { Phase::Ice } else { Phase::Ranged }
+                                    } else {
+                                        Phase::ChargeStart
+                                    })
+                                } else {
+                                    None
+                                }
+                            }
+                        }
+                    }
+                } {
                     d.set(phase);
                     if data.events.is_empty() {
                         out.spatial_sounds.push((attack_sound(d), d.center()));
@@ -1538,6 +1579,7 @@ pub fn check(assets: &mut Assets) -> Result<()> {
                 shield: 0.,
                 unseen: 0.,
                 hop: Vec3::ZERO,
+                think: 0.,
             }),
             ..Default::default()
         };
@@ -1701,6 +1743,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
                 shield: 0.,
                 unseen: 0.,
                 hop: Vec3::ZERO,
+                think: 0.,
             });
             let center = visuals.dice.demon.as_ref().unwrap().center();
             ensure!(
@@ -1821,6 +1864,7 @@ mod tests {
                 shield: 0.,
                 unseen: 0.,
                 hop: Vec3::ZERO,
+                think: 0.,
             }),
             ..State::default()
         }
