@@ -1136,7 +1136,7 @@ impl State {
         }
     }
 }
-fn spawn(world: &World, at: Vec3, kind: usize) -> Option<Vec3> {
+fn spawn(world: &World, at: Vec3, _kind: usize) -> Option<Vec3> {
     let half = vec3(32., 32., 40.);
     for offset in [
         Vec3::ZERO,
@@ -1941,7 +1941,7 @@ mod tests {
                 let mut results = Vec::new();
                 for hz in [30, 60, 144] {
                     let mut s = demon(kind);
-                    let center = s.demon.as_ref().unwrap().center();
+                    let center = s.demon.as_ref().unwrap().target().center;
                     let target = Target {
                         id: 2,
                         center: center + Vec3::X * distance,
