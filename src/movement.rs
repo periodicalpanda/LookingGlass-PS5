@@ -13,6 +13,24 @@ pub const FIXED_DT: f32 = 1. / 120.;
 // Strides are paced by actual travel, so feet follow these speeds.
 pub const WALK_SPEED: f32 = 64.6;
 pub const RUN_SPEED: f32 = 219.;
+/// Native run speeds measured in game: forward 219, backward 203, strafe 223.
+const BACK_RATIO: f32 = 203. / 219.;
+const STRAFE_RATIO: f32 = 223. / 219.;
+/// Speed factor for travelling along `wish` while facing `view` (lock-strafe).
+fn direction_ratio(wish: Vec2, view: Vec2) -> f32 {
+    if view.length_squared() < 0.5 || wish.length_squared() < 1e-8 {
+        return 1.;
+    }
+    let (v, w) = (view.normalize(), wish.normalize());
+    let (forward, side) = (w.dot(v), (w.x * v.y - w.y * v.x).abs());
+    let along = if forward >= 0. { forward } else { -forward * BACK_RATIO };
+    let weight = forward.abs() + side;
+    if forward >= 0. {
+        (forward + side * STRAFE_RATIO) / weight
+    } else {
+        (along + side * STRAFE_RATIO) / weight
+    }
+}
 pub(crate) const STEP_HEIGHT: f32 = 18.;
 pub const GRAVITY: f32 = 800.;
 // Local Player jump event: half gravity in the ordinary, unpowered state.
@@ -39,6 +57,8 @@ pub const FLOAT_DEPTH: f32 = 44.;
 pub struct Controls {
     pub use_pressed: bool,
     pub wish: Vec2,
+    /// Unit view direction under lock-strafe (zero: unknown, no directional scaling).
+    pub view: Vec2,
     /// Full look-relative direction, used only in water.
     pub swim: Vec3,
     /// Held ascent/descent input; unlike jumping this is not edge-triggered.
@@ -494,6 +514,7 @@ impl Player {
         let wish = input.wish.clamp_length_max(1.);
         let target = wish
             * if input.run { RUN_SPEED } else { WALK_SPEED }
+            * direction_ratio(wish, input.view)
             * if self.tea { 2. } else { 1. }
             * if self.immersion.level > 0 { 0.7 } else { 1. };
         let mut horizontal = self.velocity.truncate();
@@ -971,6 +992,18 @@ mod tests {
             assert!((p.velocity.x - expected).abs() < 0.001);
             assert!((p.feet.x - start.x - expected).abs() < 0.01);
             assert!(world.body_clear(p.feet) && p.grounded);
+        }
+    }
+    #[test]
+    fn lock_strafe_speeds_follow_native_forward_back_and_strafe() {
+        let world = floor();
+        for (wish, expected) in [(Vec2::X, 219.), (-Vec2::X, 203.), (Vec2::Y, 223.)] {
+            let mut p = Player::new(Vec3::Z * 0.04);
+            let input = Controls { wish, view: Vec2::X, run: true, ..Default::default() };
+            for _ in 0..240 {
+                p.tick(&world, input);
+            }
+            assert!((p.velocity.truncate().length() - expected).abs() < 0.01, "{wish}");
         }
     }
     #[test]

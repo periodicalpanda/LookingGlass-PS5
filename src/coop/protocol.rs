@@ -292,6 +292,8 @@ impl RemoteInput {
         (
             Controls {
                 wish: self.last.wish,
+                // Not on the wire: co-op keeps the simulation identical on every peer.
+                view: Vec2::ZERO,
                 swim: self.last.swim,
                 rise: self.last.rise,
                 run: self.last.run,

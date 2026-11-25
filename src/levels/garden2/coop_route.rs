@@ -125,6 +125,7 @@ impl Driver {
                         && (p.grounded || s.mode=="leap" && p.rope.is_some())) || stuck;
                     self.jumped |= jump;
                     control = Controls {
+                        view:Vec2::ZERO,
                         wish:if s.mode=="rise" {(d/100.).clamp_length_max(1.)} else {d.normalize_or_zero()},
                         swim:d.normalize_or_zero().extend(0.),
                         rise:if p.immersion.level>0 || s.mode=="leap" && self.ticks==0 {1.} else {0.},

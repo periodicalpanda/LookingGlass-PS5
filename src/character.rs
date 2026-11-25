@@ -2918,8 +2918,10 @@ mod tests {
                     let span = a.sound_span.unwrap().1;
                     elapsed += span.end - span.start;
                 }
+                // Native walk speed is 1.25x the clip's own root travel per second.
+                let expected = crate::movement::WALK_SPEED / 51.7;
                 assert!(
-                    (elapsed / fraction - 1.).abs() < 0.02,
+                    (elapsed / fraction / expected - 1.).abs() < 0.02,
                     "{} at {fraction} speed advanced {elapsed} seconds",
                     CLIPS[index]
                 );

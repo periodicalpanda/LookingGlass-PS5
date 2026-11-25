@@ -1969,6 +1969,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     use_pressed: use_pressed
                         && matches!(owner, UseOwner::SharedRope | UseOwner::Traversal),
                     wish: wish.clamp_length_max(1.),
+                    view: if alice.lock_strafe { flat } else { Vec2::ZERO },
                     swim: movement.clamp_length_max(1.),
                     rise: f32::from(held(KeyCode::Space)) - f32::from(held(KeyCode::LeftControl)),
                     jump: !overlay_before && pressed(KeyCode::Space),
