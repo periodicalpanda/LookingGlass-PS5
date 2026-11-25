@@ -27,7 +27,9 @@ impl Liquid {
         match self {
             Self::Dry => Vec4::ZERO,
             Self::Water => vec4(0.055, 0.16, 0.19, 1500.),
-            Self::Slime => vec4(0.16, 0.22, 0.065, 800.),
+            // Native screen blend (fgamex86 FUN_100a92b0, sampled at the camera): only CONTENTS_LAVA (8)
+            // and CONTENTS_WATER (0x20) tint the view; slime (0x10) gets no blend at all.
+            Self::Slime => Vec4::ZERO,
             Self::Lava => vec4(0.45, 0.09, 0.015, 500.),
         }
     }
