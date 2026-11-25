@@ -59,6 +59,8 @@ struct Saved {
     doors: Vec<f32>,
     holds: Vec<f32>,
     sinks: Vec<f32>,
+    #[serde(default)]
+    sink_vel: Vec<f32>,
     hints: [bool; 2],
     scene: Option<Scene>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +90,7 @@ impl Saved {
             doors: vec![0.; n],
             holds: vec![0.; n],
             sinks: vec![0.; n],
+            sink_vel: vec![0.; n],
             hints: [false; 2],
             scene: None,
             pull: None,

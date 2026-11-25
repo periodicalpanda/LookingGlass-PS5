@@ -250,11 +250,11 @@ fn sinks(a: &mut Assets, map: &Bsp) -> Result<()> {
         }
         let mut p = people([feet[0], feet[1]]); if reversed { p.reverse(); }
         let mut s = stats(); ensure!(clear(&w, &p), "Invalid paired pillar fixture");
-        for _ in 0..6 { tick(&mut o, map, &mut w, &mut p, &mut s)?; ensure!(clear(&w, &p), "Sinking pillars embedded a rider"); }
+        for _ in 0..60 { tick(&mut o, map, &mut w, &mut p, &mut s)?; ensure!(clear(&w, &p), "Sinking pillars embedded a rider"); }
         ensure!(indices.iter().all(|&k| o.saved.sinks[k] > 50.), "Both occupied pillars did not respond");
         o = roundtrip(a, map, &o)?;
         p = people([vec3(10000., 10000., 0.), vec3(10100., 10000., 0.)]);
-        for _ in 0..252 { tick(&mut o, map, &mut w, &mut p, &mut s)?; }
+        for _ in 0..600 { tick(&mut o, map, &mut w, &mut p, &mut s)?; }
         ensure!(indices.iter().all(|&k| o.saved.sinks[k] == 0.), "Empty paired pillars did not reset");
         println!("PASS Clockwork two sinking pillars reversed{reversed}: independent occupancy, saved state and reset");
     }

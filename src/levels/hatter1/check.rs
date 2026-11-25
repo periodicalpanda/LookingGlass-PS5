@@ -71,7 +71,7 @@ pub(super) fn traversal(a: &mut Assets) -> Result<()> {
             .with_context(|| format!("Sink {id} has no walkable top"))?;
         p = Player::new(feet);
         p.grounded = true;
-        tick(&mut o, &map, &mut w, &mut p, 0.05, 120)?;
+        tick(&mut o, &map, &mut w, &mut p, 1., 120)?;
         ensure!(w.body_clear(p.feet), "Sink embedded Alice");
         ensure!(
             if id <= 807 {
@@ -83,7 +83,7 @@ pub(super) fn traversal(a: &mut Assets) -> Result<()> {
             o.saved.sinks[k]
         );
         p = Player::spawn(&w, interaction::spawn(&map, None).0).unwrap();
-        tick(&mut o, &map, &mut w, &mut p, 2.1, 120)?;
+        tick(&mut o, &map, &mut w, &mut p, 9., 120)?;
         ensure!(o.saved.sinks[k] == 0., "Sink {id} did not reset");
     }
     p = Player::new(

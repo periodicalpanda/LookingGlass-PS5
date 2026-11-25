@@ -55,7 +55,7 @@ pub(super) fn load(map: &Bsp) -> Result<Vec<Object>> {
             let speed = num(
                 e,
                 "speed",
-                if class == "func_sinkobject" { 8. } else { 100. },
+                if class == "func_sinkobject" { 50. } else { 100. },
             );
             // Cache local brush geometry once. Placing it only transforms the
             // bounds until a collision query actually reaches the machine.
@@ -135,8 +135,7 @@ impl Clockwork {
         for (k, o) in self.objects.iter().enumerate() {
             if o.class == "func_sinkobject" {
                 let occupied = supports.iter().any(|s| s.is_some_and(|(i, _)| i == k));
-                let speed = if occupied { o.speed } else { o.speed.min(100.) };
-                self.saved.sinks[k] = approach(self.saved.sinks[k], if occupied { o.limit } else { 0. }, speed * dt);
+                sink_step(&mut self.saved, (o.speed, o.limit), k, occupied, dt, before.age);
             }
             if !o.class.contains("door") { continue; }
             let scripted = self.door_target(o);
@@ -175,7 +174,7 @@ impl Clockwork {
                 }
             }
             if attempt == 0 && !blocked_sinks.is_empty() {
-                for k in blocked_sinks { self.saved.sinks[k] = before.sinks[k]; }
+                for k in blocked_sinks { self.saved.sinks[k] = before.sinks[k]; self.saved.sink_vel[k] = 0.; }
                 continue;
             }
             for (i, a) in proposed.iter().enumerate() {
@@ -532,12 +531,7 @@ impl Clockwork {
         for (k, o) in self.objects.iter().enumerate() {
             if o.class == "func_sinkobject" {
                 let occupied = support.is_some_and(|(j, _)| j == k);
-                let speed = if occupied { o.speed } else { o.speed.min(100.) };
-                self.saved.sinks[k] = approach(
-                    self.saved.sinks[k],
-                    if occupied { o.limit } else { 0. },
-                    speed * dt,
-                );
+                sink_step(&mut self.saved, (o.speed, o.limit), k, occupied, dt, old.age);
             }
             if !o.class.contains("door") {
                 continue;
@@ -583,6 +577,7 @@ impl Clockwork {
             // doors and scene clocks while Alice remains on the chair.
             if let Some((k, _)) = support.filter(|(k, _)| self.objects[*k].class == "func_sinkobject") {
                 self.saved.sinks[k] = old.sinks[k];
+                self.saved.sink_vel[k] = 0.;
                 self.rebuild(map)?;
                 w.set_dynamic(fixed.iter().cloned().chain(self.colliders()).collect());
                 if w.body_clear(p.feet) {
@@ -597,6 +592,38 @@ impl Clockwork {
         }
         Ok(())
     }
+}
+    /// Native `SinkObject` (fgamex86 FUN_100e9900 fall, 0x100e9b10 adjust), stepped at sv_fps 20.
+    /// Each 0.05 s tick: while stood on, downward velocity grows by `speed * 0.004`; otherwise the
+    /// spring `v = (v - sink * 0.02) * 0.95` pulls it home and snaps below 0.5 units and 1 u/s.
+    /// Position integrates the velocity every frame and is clamped at the sink limit.
+fn sink_step(saved: &mut super::Saved, (speed, limit): (f32, f32), k: usize, occupied: bool, dt: f32, old_age: f32) {
+    let n = saved.sinks.len();
+    saved.sink_vel.resize(n, 0.);
+    let accel = speed * 0.004;
+    let ticks = (saved.age * 20.).floor() as i64 - (old_age * 20.).floor() as i64;
+        let (mut z, mut v) = (saved.sinks[k], saved.sink_vel[k]);
+        for _ in 0..ticks.clamp(0, 8) {
+            if occupied {
+                v += accel;
+            } else {
+                v = (v - z * 0.02) * 0.95;
+                if z.abs() < 0.5 && v.abs() < 1. {
+                    z = 0.;
+                    v = 0.;
+                }
+            }
+        }
+        z += v * dt;
+        if z > limit {
+            z = limit;
+            v = 0.;
+        } else if z < 0. {
+            z = 0.;
+            v = 0.;
+        }
+    saved.sinks[k] = z;
+    saved.sink_vel[k] = v;
 }
 pub(super) fn dunk(t: f32) -> f32 {
     let t = (t - 3.).max(0.).rem_euclid(12.);
