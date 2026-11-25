@@ -238,8 +238,8 @@ impl Demon {
     pub fn target(&self) -> Target {
         Target {
             id: SUMMON,
-            center: self.center(),
-            half: vec3(32., 32., 40.) * self.scale(),
+            center: self.feet + Vec3::Z * 40.,
+            half: vec3(32., 32., 40.),
         }
     }
     fn set(&mut self, phase: Phase) {
@@ -899,7 +899,7 @@ impl State {
             } else {
                 &enemies
             };
-            let center = d.center();
+            let center = d.target().center;
             let attacking = !matches!(d.phase, Phase::Idle | Phase::Move);
             // Actor think: a remembered enemy is forgotten once it has gone unseen (vision distance
             // 1200, 360 degree fov, line of sight) for the 30 s enemy memory.
@@ -1137,7 +1137,7 @@ impl State {
     }
 }
 fn spawn(world: &World, at: Vec3, kind: usize) -> Option<Vec3> {
-    let half = vec3(32., 32., 40.) * SIZE[kind];
+    let half = vec3(32., 32., 40.);
     for offset in [
         Vec3::ZERO,
         Vec3::X * 72.,
@@ -1164,7 +1164,7 @@ fn spawn(world: &World, at: Vec3, kind: usize) -> Option<Vec3> {
 }
 fn move_demon(d: &mut Demon, world: &World, target: Vec3, speed: f32) -> bool {
     let half = d.target().half;
-    let center = d.center();
+    let center = d.feet + Vec3::Z * half.z;
     let delta = if d.kind == 0 {
         target - center
     } else {
