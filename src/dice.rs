@@ -935,6 +935,9 @@ impl State {
                     .max(Vec3::ZERO)
                     .length();
                 let sees = visible(ctx.world, center, t.center);
+                // Native RANGE condition (FUN_10006f90): strict 3D distance between the two
+                // entity origins (feet), not the gap between hulls.
+                let range = (t.center - Vec3::Z * t.half.z - d.feet).length();
                 let angle = delta.y.atan2(delta.x);
                 let turn = (angle - d.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
                     - std::f32::consts::PI;
@@ -1087,17 +1090,17 @@ impl State {
                         };
                         d.set(next);
                     }
-                } else if d.cooldown <= 0. && sees && gap < 600. {
+                } else if d.cooldown <= 0. && sees && range < 600. {
                     self.seed = self.seed.wrapping_mul(214013).wrapping_add(2531011);
                     let roll = (self.seed >> 16) & 0x7fff;
-                    let phase = if gap < [120., 125., 120.][d.kind] {
+                    let phase = if range < [120., 125., 120.][d.kind] {
                         if d.kind == 1 && roll % 2 == 0 {
                             Phase::Claw
                         } else {
                             Phase::Melee
                         }
                     } else if d.kind == 2 {
-                        if gap > 450. && roll % 5 != 0 || roll % 3 == 0 {
+                        if range >= 450. && roll % 5 != 0 || roll % 3 == 0 {
                             Phase::ChargeStart
                         } else if roll % 2 == 0 {
                             Phase::Ice
