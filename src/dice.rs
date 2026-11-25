@@ -227,6 +227,9 @@ pub struct Demon {
     /// Seconds since the held target was last seen (Actor enemy memory, native default 30 s).
     #[serde(default)]
     unseen: f32,
+    /// Emerge launch velocity (FUN_10061030): (direction x 100, 50), ballistic until it lands.
+    #[serde(default)]
+    hop: Vec3,
 }
 impl Demon {
     fn scale(&self) -> f32 {
@@ -512,6 +515,8 @@ impl State {
                     && (d.health > 0. || matches!(d.phase, Phase::Dead | Phase::Vanish))
                     && (0.0..=1e9).contains(&d.life)
                     && d.recoil.valid()
+                    && d.hop.is_finite()
+                    && d.hop.length_squared() <= 400_f32.powi(2)
                     && (0.0..=1.).contains(&d.shield)
                     && (0.0..=1e9).contains(&d.time)
                     && (0.0..=3.).contains(&d.cooldown)
@@ -801,6 +806,18 @@ impl State {
                 let (age, kind) = (r.age, r.kind);
                 let feet = r.feet;
                 self.rift = None;
+                // FUN_100605b0: direction = normalize(normalize(player - rift).xy + (cos a, sin a))
+                // with a = rand/32767 * 1.5 - 0.75 rad in world axes; FUN_10061030 launches the actor at
+                // (direction x 100, 50) with its ground entity cleared. Walking summons only.
+                self.seed = self.seed.wrapping_mul(214013).wrapping_add(2531011);
+                let angle = ((self.seed >> 16) & 0x7fff) as f32 / 32767. * 1.5 - 0.75;
+                let toward = (alice.center - feet).truncate().normalize_or_zero();
+                let launch = (toward + Vec2::new(angle.cos(), angle.sin())).normalize_or_zero();
+                let hop = if kind == 0 {
+                    Vec3::ZERO
+                } else {
+                    (launch * 100.).extend(50.)
+                };
                 // The spawn point was validated when the rift opened.
                 self.demon = Some(feet).map(|feet| {
                     let center = feet + Vec3::Z * 40. * SIZE[kind];
@@ -836,6 +853,7 @@ impl State {
                         recoil: Default::default(),
                         shield: 0.,
                         unseen: 0.,
+                        hop,
                     }
                 });
             }
@@ -849,6 +867,25 @@ impl State {
             }
             d.shield = (d.shield - STEP).max(0.);
             d.feet += d.recoil.step(STEP, ctx.world, d.target());
+            if d.hop != Vec3::ZERO {
+                d.hop.z -= crate::movement::GRAVITY * STEP;
+                let half = d.target().half;
+                let from = d.feet + Vec3::Z * half.z;
+                let delta = d.hop * STEP;
+                let trace = ctx.world.sweep(from, from + delta, half);
+                if trace.start_solid {
+                    d.hop = Vec3::ZERO;
+                } else {
+                    d.feet += delta * trace.fraction;
+                    if trace.fraction < 1. {
+                        if trace.normal.z > 0.7 {
+                            d.hop = Vec3::ZERO;
+                        } else {
+                            d.hop -= trace.normal * d.hop.dot(trace.normal).min(0.);
+                        }
+                    }
+                }
+            }
             if d.time == 0. && d.phase == Phase::Vanish {
                 out.sounds.push(CLOSE);
             }
@@ -1500,6 +1537,7 @@ pub fn check(assets: &mut Assets) -> Result<()> {
                 recoil: Default::default(),
                 shield: 0.,
                 unseen: 0.,
+                hop: Vec3::ZERO,
             }),
             ..Default::default()
         };
@@ -1662,6 +1700,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
                 recoil: Default::default(),
                 shield: 0.,
                 unseen: 0.,
+                hop: Vec3::ZERO,
             });
             let center = visuals.dice.demon.as_ref().unwrap().center();
             ensure!(
@@ -1781,6 +1820,7 @@ mod tests {
                 recoil: Default::default(),
                 shield: 0.,
                 unseen: 0.,
+                hop: Vec3::ZERO,
             }),
             ..State::default()
         }
@@ -2039,6 +2079,32 @@ mod tests {
         }
         assert_eq!(closes, 0); // Killed actors use death, not the idle dismissal rift.
         assert!(s.demon.is_none() && s.ready());
+    }
+    #[test]
+    fn emerging_walkers_hop_out_of_the_rift_and_land_unlike_fliers() {
+        let world = floor();
+        for kind in 0..3 {
+            let mut s = demon(kind);
+            let d = s.demon.as_mut().unwrap();
+            if kind != 0 {
+                d.hop = vec3(100., 0., 50.);
+            }
+            let start = d.feet;
+            for _ in 0..240 {
+                s.advance(
+                    1. / 120.,
+                    &Context { world: &world, targets: &[] },
+                    Vec3::Z * 60.,
+                    &data(),
+                );
+            }
+            let d = s.demon.as_ref().unwrap();
+            assert_eq!(d.hop, Vec3::ZERO, "kind {kind} never landed");
+            if kind != 0 {
+                assert!(d.feet.x - start.x > 5. && d.feet.x - start.x < 40.);
+                assert!(d.feet.z.abs() < 1.);
+            }
+        }
     }
     #[test]
     fn notarget_removes_alice_from_hostile_demon_targets() {
